@@ -1,5 +1,4 @@
-import os
-import subprocess
+import ast, json, os, subprocess
 from pathlib import Path
 
 from anthropic import Anthropic
@@ -15,8 +14,27 @@ if os.getenv("ANTHROPIC_BASE_URL"):
 WORKDIR = Path.cwd()
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
+CURRENT_TODOS: list[dict] = []
 
-SYSTEM = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks. Act, don't explain."
+# v5 更新系统提示词
+SYSTEM = (
+    f"You are a coding agent at {WORKDIR}. "
+    "Before starting any multi-step task, use todo_write to plan your steps. "
+    "Update status as you go."
+)
+
+
+""" 
+v2-v4 工具实现
+"""
+
+
+def safe_path(p: str) -> Path:
+    # 拼接与解析路径
+    path = (WORKDIR / p).resolve()
+    if not path.is_relative_to(WORKDIR):
+        raise ValueError(f"Path escapes workspace: {p}")
+    return path
 
 
 def run_bash(command: str) -> str:
@@ -41,19 +59,6 @@ def run_bash(command: str) -> str:
         return "Error: Timeout (120s)"
     except (FileNotFoundError, OSError) as e:
         return f"Error: {e}"
-
-
-""" 
-v2新增4个工具 读写改配
-"""
-
-
-def safe_path(p: str) -> Path:
-    # 拼接与解析路径
-    path = (WORKDIR / p).resolve()
-    if not path.is_relative_to(WORKDIR):
-        raise ValueError(f"Path escapes workspace: {p}")
-    return path
 
 
 def run_read(path: str, limit: int | None = None) -> str:
@@ -104,7 +109,56 @@ def run_glob(pattern: str) -> str:
 
 
 """ 
-v2 工具定义与分发映射
+v5 todo_write工具
+"""
+
+
+# 将输入的todos规范化为列表形式，并进行基本验证
+def _normalize_todos(todos):
+    if isinstance(todos, str):
+        try:
+            # 先尝试使用json.loads解析字符串为Python对象
+            todos = json.loads(todos)
+        except json.JSONDecodeError:
+            try:
+                # 再使用ast.literal_eval解析字符串为Python对象，安全性高于eval
+                todos = ast.literal_eval(todos)
+            except (SyntaxError, ValueError):
+                return None, "Error: todos must be a list or JSON array string"
+    if not isinstance(todos, list):
+        return None, "Error: todos must be a list"
+    # i为索引，t为每个todo项
+    for i, t in enumerate(todos):
+        if not isinstance(t, dict):
+            return None, f"Error: todos[{i}] must be an object"
+        if "content" not in t or "status" not in t:
+            return None, f"Error: todos[{i}] missing 'content' or 'status'"
+        if t["status"] not in ("pending", "in_progress", "completed"):
+            return None, f"Error: todos[{i}] has invalid status '{t['status']}'"
+    return todos, None
+
+
+def run_todo_write(todos: list) -> str:
+    global CURRENT_TODOS
+    todos, error = _normalize_todos(todos)
+    if error:
+        return error
+    CURRENT_TODOS = todos
+    lines = ["\n\033[33m## Current Tasks\033[0m"]
+    for t in CURRENT_TODOS:
+        # 字典即建即用模式，定义字典后立刻用[key]取值，不需要给字典起名字
+        icon = {
+            "pending": " ",
+            "in_progress": "\033[36m▸\033[0m",
+            "completed": "\033[32m✓\033[0m",
+        }[t["status"]]
+        lines.append(f"  [{icon}] {t['content']}")
+    print("\n".join(lines))
+    return f"Updated {len(CURRENT_TODOS)} tasks"
+
+
+""" 
+v2-v5 工具定义与分发映射
 """
 
 TOOLS = [
@@ -157,6 +211,31 @@ TOOLS = [
             "required": ["pattern"],
         },
     },
+    # v5 新工具
+    {
+        "name": "todo_write",
+        "description": "Create and manage a task list for your current coding session.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed"],
+                            },
+                        },
+                        "required": ["content", "status"],
+                    },
+                }
+            },
+            "required": ["todos"],
+        },
+    },
 ]
 
 TOOL_HANDLERS = {
@@ -165,6 +244,7 @@ TOOL_HANDLERS = {
     "write_file": run_write,
     "edit_file": run_edit,
     "glob": run_glob,
+    "todo_write": run_todo_write,
 }
 
 """ 
@@ -173,8 +253,10 @@ v4 hook
 
 HOOKS = {"UserPromptSubmit": [], "PreToolUse": [], "PostToolUse": [], "Stop": []}
 
+
 def register_hook(event: str, callback):
     HOOKS[event].append(callback)
+
 
 # "*"表示可变位置参数，除了event之外的所有参数都打包成一个元组赋给args，最终传递给回调函数
 def trigger_hooks(event: str, *args):
@@ -185,6 +267,7 @@ def trigger_hooks(event: str, *args):
             return result
     return None
 
+
 """ 
 v3 三重权限检验
 v4 打包权限检验逻辑为hook
@@ -194,9 +277,10 @@ v4 打包权限检验逻辑为hook
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"]
 DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"]
 
+
 # 工具调用之前：v3权限检验移动至此
 def permission_hook(block):
-    
+
     if block.name == "bash":
         for pattern in DENY_LIST:
             if pattern in block.input.get("command", ""):
@@ -219,12 +303,14 @@ def permission_hook(block):
                 return "Permission denied by user"
     return None
 
+
 # 工具调用之前：记录每个工具调用的日志
 def log_hook(block):
     # 前两个参数的预览（最多60个字符）
     args_preview = str(list(block.input.values())[:2])[:60]
     print(f"\033[90m[HOOK] {block.name}({args_preview})\033[0m")
     return None
+
 
 # 工具调用之后：警告大输出
 def large_output_hook(block, output):
@@ -234,10 +320,12 @@ def large_output_hook(block, output):
         )
     return None
 
+
 # 用户提问提交时：在用户提问抵达模型之前触发，打印工作目录
 def context_inject_hook(query: str):
     print(f"\033[90m[HOOK] UserPromptSubmit: working in {WORKDIR}\033[0m")
     return None
+
 
 # 停止循环时：统计工具调用次数
 def summary_hook(messages: list):
@@ -251,6 +339,7 @@ def summary_hook(messages: list):
     print(f"\033[90m[HOOK] Stop: session used {tool_count} tool calls\033[0m")
     return None
 
+
 # 注册hook
 register_hook("PreToolUse", permission_hook)
 register_hook("PreToolUse", log_hook)
@@ -263,11 +352,21 @@ register_hook("Stop", summary_hook)
 v2 修改工具执行部分
 v3 插入检查权限函数
 v4 插入hook触发
+v5 提醒计数器
 """
+
+rounds_since_todo = 0
 
 
 def agent_loop(messages: list):
     while True:
+        # 每轮循环前检查是否需要提醒更新todo列表
+        if rounds_since_todo >= 3 and messages:
+            messages.append(
+                {"role": "user", "content": "<reminder>Update your todos.</reminder>"}
+            )
+            rounds_since_todo = 0
+
         # 首次循环仅有用户提问，之后循环包含助手回复与工具结果
         response = client.messages.create(
             model=MODEL,
@@ -308,6 +407,7 @@ def agent_loop(messages: list):
         大模型生成原始输出，由Anthropic API 的服务端进行格式处理
         """
 
+        rounds_since_todo += 1
         # 执行每个工具调用，收集结果
         results = []
         for block in response.content:
@@ -329,10 +429,10 @@ def agent_loop(messages: list):
             handler = TOOL_HANDLERS.get(block.name)
             # "**"为解包字典，将字典的键值对作为关键字参数传递给函数
             output = handler(**block.input) if handler else f"Unknown: {block.name}"
-            
+
             # PostToolUse
             trigger_hooks("PostToolUse", block, output)
-            
+
             results.append(
                 {
                     "type": "tool_result",
@@ -346,13 +446,13 @@ def agent_loop(messages: list):
 
 
 if __name__ == "__main__":
-    print("Version 4: Hooks")
+    print("Version 5: ToDo Write")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     history = []
     while True:
         try:
-            query = input("\033[36ms04 >> \033[0m")
+            query = input("\033[36ms05 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):
