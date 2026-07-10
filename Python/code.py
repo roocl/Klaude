@@ -21,11 +21,18 @@ SYSTEM = (
     f"You are a coding agent at {WORKDIR}. "
     "Before starting any multi-step task, use todo_write to plan your steps. "
     "Update status as you go."
+    "For complex sub-problems, use the task tool to spawn a subagent."
 )
 
+# v6 子系统提示词
+SUB_SYSTEM = (
+    f"You are a coding agent at {WORKDIR}. "
+    "Complete the task you were given, then return a concise summary. "
+    "Do not delegate further."
+)
 
 """ 
-v2-v4 工具实现
+v2-v5 工具实现
 """
 
 
@@ -157,8 +164,74 @@ def run_todo_write(todos: list) -> str:
     return f"Updated {len(CURRENT_TODOS)} tasks"
 
 
+""" v6 生成子agent """
+
+# 从消息内容块中提取文本，忽略非文本块
+def extract_text(content) -> str:
+    if not isinstance(content, list):
+        return str(content)
+    return "\n".join(
+        getattr(b, "text", "") for b in content if getattr(b, "type", None) == "text"
+    )
+    
+def spawn_subagent(description: str) -> str:
+    print(f"\n\033[35m[Subagent spawned]\033[0m")
+    # 子agent的消息上下文仅包含用户的描述
+    messages = [{"role": "user", "content": description}]
+
+    # 最多30轮循环，防止无限循环
+    for _ in range(30):
+        response = client.messages.create(
+            model=MODEL,
+            system=SUB_SYSTEM,
+            messages=messages,
+            tools=SUB_TOOLS,
+            max_tokens=8000,
+        )
+        messages.append({"role": "assistant", "content": response.content})
+        if response.stop_reason != "tool_use":
+            break
+        results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                # 子agent也运行hook，权限检查同样适用
+                blocked = trigger_hooks("PreToolUse", block)
+                if blocked:
+                    results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": str(blocked),
+                        }
+                    )
+                    continue
+                handler = SUB_HANDLERS.get(block.name)
+                output = handler(**block.input) if handler else f"Unknown: {block.name}"
+                trigger_hooks("PostToolUse", block, output)
+                print(f"  \033[90m[sub] {block.name}: {str(output)[:100]}\033[0m")
+                results.append(
+                    {"type": "tool_result", "tool_use_id": block.id, "content": output}
+                )
+        messages.append({"role": "user", "content": results})
+
+    # 如果子agent在30轮循环后仍未给出最终答案，则回溯查找最后一个助手的文本回复作为结果
+    result = extract_text(messages[-1]["content"])
+    # 从后往前遍历所有消息，找到第一个有文本的助手回复
+    if not result:
+        for msg in reversed(messages):
+            if msg["role"] == "assistant":
+                result = extract_text(msg["content"])
+                if result:
+                    break
+        # 整个消息列表里没有任何助手消息包含文本，返回固定报错
+        if not result:
+            result = "Subagent stopped after 30 turns without final answer."
+    print(f"\033[35m[Subagent done]\033[0m")
+    # 仅返回最终结论，丢弃整个消息历史
+    return result
+
 """ 
-v2-v5 工具定义与分发映射
+v2-v6 工具定义与分发映射
 """
 
 TOOLS = [
@@ -236,6 +309,16 @@ TOOLS = [
             "required": ["todos"],
         },
     },
+    # v6 新工具
+    {
+        "name": "task",
+        "description": "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"description": {"type": "string"}},
+            "required": ["description"],
+        },
+    },
 ]
 
 TOOL_HANDLERS = {
@@ -245,11 +328,75 @@ TOOL_HANDLERS = {
     "edit_file": run_edit,
     "glob": run_glob,
     "todo_write": run_todo_write,
+    "task": spawn_subagent
 }
 
-""" 
-v4 hook
-"""
+""" v6 子agent工具定义与映射 """
+
+SUB_TOOLS = [
+    {
+        "name": "bash",
+        "description": "Run a shell command.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+    },
+    {
+        "name": "read_file",
+        "description": "Read file contents.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "write_file",
+        "description": "Write content to a file.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "edit_file",
+        "description": "Replace exact text in a file once.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "old_text": {"type": "string"},
+                "new_text": {"type": "string"},
+            },
+            "required": ["path", "old_text", "new_text"],
+        },
+    },
+    {
+        "name": "glob",
+        "description": "Find files matching a glob pattern.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"pattern": {"type": "string"}},
+            "required": ["pattern"],
+        },
+    },
+]
+
+SUB_HANDLERS = {
+    "bash": run_bash,
+    "read_file": run_read,
+    "write_file": run_write,
+    "edit_file": run_edit,
+    "glob": run_glob,
+}
+
+
+
+
+""" v4 hook """
 
 HOOKS = {"UserPromptSubmit": [], "PreToolUse": [], "PostToolUse": [], "Stop": []}
 
@@ -359,6 +506,7 @@ rounds_since_todo = 0
 
 
 def agent_loop(messages: list):
+    global rounds_since_todo
     while True:
         # 每轮循环前检查是否需要提醒更新todo列表
         if rounds_since_todo >= 3 and messages:
@@ -433,6 +581,10 @@ def agent_loop(messages: list):
             # PostToolUse
             trigger_hooks("PostToolUse", block, output)
 
+            # 重置计数器
+            if block.name == "todo_write":
+                rounds_since_todo = 0
+
             results.append(
                 {
                     "type": "tool_result",
@@ -446,13 +598,13 @@ def agent_loop(messages: list):
 
 
 if __name__ == "__main__":
-    print("Version 5: ToDo Write")
+    print("Version 6: SubAgent")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     history = []
     while True:
         try:
-            query = input("\033[36ms05 >> \033[0m")
+            query = input("\033[36ms06 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):
