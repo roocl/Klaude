@@ -119,7 +119,7 @@ def run_glob(pattern: str) -> str:
 
 
 """ 
-v2 工具定义
+v2 工具定义与分发映射
 """
 
 TOOLS = [
@@ -174,10 +174,6 @@ TOOLS = [
     },
 ]
 
-""" 
-v2 工具分发映射
-"""
-
 TOOL_HANDLERS = {
     "bash": run_bash,
     "read_file": run_read,
@@ -187,8 +183,73 @@ TOOL_HANDLERS = {
 }
 
 """ 
-v2 修改工具执行部分
+v3 三重权限检验
 """
+
+# 1. 硬性拒绝列表
+DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"]
+
+
+def check_deny_list(command: str) -> str | None:
+    for pattern in DENY_LIST:
+        if pattern in command:
+            return f"Blocked: '{pattern}' is on the deny list"
+    return None
+
+
+# 2. 规则匹配检查
+PERMISSION_RULES = [
+    {
+        "tools": ["write_file", "edit_file"],
+        # lambda表达式，接收参数args，即block.input字典
+        "check": lambda args: not (WORKDIR / args.get("path", ""))
+        .resolve()
+        .is_relative_to(WORKDIR),
+        "message": "Writing outside workspace",
+    },
+    {
+        "tools": ["bash"],
+        "check": lambda args: any(
+            kw in args.get("command", "") for kw in ["rm ", "> /etc/", "chmod 777"]
+        ),
+        "message": "Potentially destructive command",
+    },
+]
+
+def check_rules(tool_name: str, args: dict) -> str | None:
+    for rule in PERMISSION_RULES:
+        if tool_name in rule["tools"] and rule["check"](args):
+            return rule["message"]
+    return None
+
+
+# 3. 用户确认
+def ask_user(tool_name: str, args: dict, reason: str) -> str:
+    print(f"\n\033[33m⚠  {reason}\033[0m")
+    print(f"   Tool: {tool_name}({args})")
+    choice = input("   Allow? [y/N] ").strip().lower()
+    return "allow" if choice in ("y", "yes") else "deny"
+
+# 权限检验链
+def check_permission(block) -> bool:
+    if block.name == "bash":
+        reason = check_deny_list(block.input.get("command", ""))
+        if reason:
+            print(f"\n\033[31m⛔ {reason}\033[0m")
+            return False
+
+    reason = check_rules(block.name, block.input)
+    if reason:
+        decision = ask_user(block.name, block.input, reason)
+        if decision == "deny":
+            return False
+    return True
+
+""" 
+v2 修改工具执行部分
+v3 插入检查权限函数
+"""
+
 
 def agent_loop(messages: list):
     while True:
@@ -230,32 +291,46 @@ def agent_loop(messages: list):
         # 执行每个工具调用，收集结果
         results = []
         for block in response.content:
-            if block.type == "tool_use":
-                print(f"\033[33m> {block.name}\033[0m")
-                handler = TOOL_HANDLERS.get(block.name)
-                # "**"为解包字典，将字典的键值对作为关键字参数传递给函数
-                output = handler(**block.input) if handler else f"Unknown: {block.name}"
-                print(output[:200])
+            if block.type != "tool_use":
+                continue
+            
+            print(f"\033[33m> {block.name}\033[0m")
+            
+            # v3 检查权限
+            if not check_permission(block):
                 results.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": output,
+                        "content": f"Permission denied for {block.name}",
                     }
                 )
+                continue
+            
+            handler = TOOL_HANDLERS.get(block.name)
+            # "**"为解包字典，将字典的键值对作为关键字参数传递给函数
+            output = handler(**block.input) if handler else f"Unknown: {block.name}"
+            print(output[:200])
+            results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": output,
+                }
+            )
 
         # 将工具结果反馈回消息列表，循环继续
         messages.append({"role": "user", "content": results})
 
 
 if __name__ == "__main__":
-    print("Version 2: More Tools")
+    print("Version 3: Permission")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     history = []
     while True:
         try:
-            query = input("\033[36ms02 >> \033[0m")
+            query = input("\033[36ms03 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):
