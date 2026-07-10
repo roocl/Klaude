@@ -1,5 +1,6 @@
 import os
 import subprocess
+from pathlib import Path
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -11,10 +12,13 @@ if os.getenv("ANTHROPIC_BASE_URL"):
     # 移除官方鉴权
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
+WORKDIR = Path.cwd()
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 
-SYSTEM = f"You are a coding agent at {os.getcwd()}. Use bash to solve tasks. Act, don't explain."
+SYSTEM = (
+    f"You are a coding agent at {WORKDIR}. Use bash to solve tasks. Act, don't explain."
+)
 
 # 单bash
 TOOLS = [
@@ -40,7 +44,7 @@ def run_bash(command: str) -> str:
         r = subprocess.run(
             command,
             shell=True,
-            cwd=os.getcwd(),
+            cwd=WORKDIR,
             capture_output=True,
             text=True,
             timeout=120,
@@ -54,6 +58,138 @@ def run_bash(command: str) -> str:
         return f"Error: {e}"
 
 
+""" 
+v2新增4个工具 读写改配
+"""
+
+
+def safe_path(p: str) -> Path:
+    # 拼接与解析路径
+    path = (WORKDIR / p).resolve()
+    if not path.is_relative_to(WORKDIR):
+        raise ValueError(f"Path escapes workspace: {p}")
+    return path
+
+
+def run_read(path: str, limit: int | None = None) -> str:
+    try:
+        lines = safe_path(path).read_text().splitlines()
+        if limit and limit < len(lines):
+            lines = lines[:limit] + [f"... ({len(lines) - limit} more lines)"]
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def run_write(path: str, content: str) -> str:
+    try:
+        file_path = safe_path(path)
+        # 递归创建父目录（如果不存在），然后写入内容
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(content)
+        return f"Wrote {len(content)} bytes to {path}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def run_edit(path: str, old_text: str, new_text: str) -> str:
+    try:
+        file_path = safe_path(path)
+        text = file_path.read_text()
+        if old_text not in text:
+            return f"Error: text not found in {path}"
+        file_path.write_text(text.replace(old_text, new_text, 1))
+        return f"Edited {path}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def run_glob(pattern: str) -> str:
+    # 只有调用时才加载模块（懒加载）
+    import glob as g
+
+    try:
+        results = []
+        for p in g.glob(str(WORKDIR / pattern), recursive=True):
+            rel_path = Path(p).relative_to(WORKDIR)
+            results.append(str(rel_path))
+        return "\n".join(results) if results else "(no matches)"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+""" 
+v2 工具定义
+"""
+
+TOOLS = [
+    {
+        "name": "bash",
+        "description": "Run a shell command.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+    },
+    {
+        "name": "read_file",
+        "description": "Read file contents.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}},
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "write_file",
+        "description": "Write content to a file.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "edit_file",
+        "description": "Replace exact text in a file once.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "old_text": {"type": "string"},
+                "new_text": {"type": "string"},
+            },
+            "required": ["path", "old_text", "new_text"],
+        },
+    },
+    {
+        "name": "glob",
+        "description": "Find files matching a glob pattern.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"pattern": {"type": "string"}},
+            "required": ["pattern"],
+        },
+    },
+]
+
+""" 
+v2 工具分发映射
+"""
+
+TOOL_HANDLERS = {
+    "bash": run_bash,
+    "read_file": run_read,
+    "write_file": run_write,
+    "edit_file": run_edit,
+    "glob": run_glob,
+}
+
+""" 
+v2 修改工具执行部分
+"""
+
 def agent_loop(messages: list):
     while True:
         # 首次循环仅有用户提问，之后循环包含助手回复与工具结果
@@ -64,15 +200,14 @@ def agent_loop(messages: list):
             tools=TOOLS,
             max_tokens=8000,
         )
-        
+
         # 将助手的回复添加到消息列表中
         messages.append({"role": "assistant", "content": response.content})
-        
+
         # 如果模型没有请求使用工具，则结束循环
         if response.stop_reason != "tool_use":
             return
-        
-        
+
         """ 
         response.content包含回复的内容块，如：
         response.content == [
@@ -91,13 +226,15 @@ def agent_loop(messages: list):
         ]
         大模型生成原始输出，由Anthropic API 的服务端进行格式处理
         """
+
         # 执行每个工具调用，收集结果
         results = []
         for block in response.content:
             if block.type == "tool_use":
-                # 
-                print(f"\033[33m$ {block.input['command']}\033[0m")
-                output = run_bash(block.input["command"])
+                print(f"\033[33m> {block.name}\033[0m")
+                handler = TOOL_HANDLERS.get(block.name)
+                # "**"为解包字典，将字典的键值对作为关键字参数传递给函数
+                output = handler(**block.input) if handler else f"Unknown: {block.name}"
                 print(output[:200])
                 results.append(
                     {
@@ -106,31 +243,27 @@ def agent_loop(messages: list):
                         "content": output,
                     }
                 )
-                
+
         # 将工具结果反馈回消息列表，循环继续
         messages.append({"role": "user", "content": results})
-        
+
 
 if __name__ == "__main__":
-    print("Version 1: Agent Loop")
+    print("Version 2: More Tools")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     history = []
     while True:
         try:
-            query = input("\033[36ms01 >> \033[0m")
+            query = input("\033[36ms02 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):
             break
         history.append({"role": "user", "content": query})
         agent_loop(history)
-        # 打印模型的最终文本回复
-        response_content = history[-1]["content"]
-        # 遍历回复内容块，打印文本部分（防御性检查）
-        if isinstance(response_content, list):
-            for block in response_content:
-                if getattr(block, "type", None) == "text":
-                    print(block.text)
+        # 遍历最终文本回复的内容块，打印文本部分（防御性检查）
+        for block in history[-1]["content"]:
+            if getattr(block, "type", None) == "text":
+                print(block.text)
         print()
-        
