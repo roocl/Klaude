@@ -1,4 +1,4 @@
-import ast, json, os, subprocess, time, re, random, yaml
+import ast, json, os, subprocess, time, re, random, yaml, threading
 
 from pathlib import Path
 from dataclasses import dataclass, asdict
@@ -73,26 +73,32 @@ def create_task(
     save_task(task)
     return task
 
+
 # 保存任务到文件
 def save_task(task: Task):
     _task_path(task.id).write_text(json.dumps(asdict(task), indent=2))
+
 
 # 从文件中加载任务
 def load_task(task_id: str) -> Task:
     return Task(**json.loads(_task_path(task_id).read_text()))
 
-# 
+
+#
 def list_tasks() -> list[Task]:
     return [
         # json -> dict -> 关键词参数
-        Task(**json.loads(p.read_text())) for p in sorted(TASKS_DIR.glob("task_*.json"))
+        Task(**json.loads(p.read_text()))
+        for p in sorted(TASKS_DIR.glob("task_*.json"))
     ]
+
 
 # 以 JSON 形式返回完整的任务详细信息
 def get_task(task_id: str) -> str:
     task = load_task(task_id)
     # task实例 -> dict -> 格式化的json字符串
     return json.dumps(asdict(task), indent=2)
+
 
 # 检查所有blockedBy dependencies是否已完成。缺少的dependencies将被视为锁定。
 def can_start(task_id: str) -> bool:
@@ -105,6 +111,7 @@ def can_start(task_id: str) -> bool:
         if load_task(dep_id).status != "completed":
             return False
     return True
+
 
 # 申领pending任务，更新任务领取者与状态
 def claim_task(task_id: str, owner: str = "agent") -> str:
@@ -123,6 +130,7 @@ def claim_task(task_id: str, owner: str = "agent") -> str:
     save_task(task)
     print(f"  \033[36m[claim] {task.subject} → in_progress (owner: {owner})\033[0m")
     return f"Claimed {task.id} ({task.subject})"
+
 
 # 更新in_progress任务状态为completed，解锁后续任务
 def complete_task(task_id: str) -> str:
@@ -1010,8 +1018,10 @@ def reactive_compact(messages):
 
 """ v12 task工具 """
 
-def run_create_task(subject: str, description: str = "",
-                    blockedBy: list[str] | None = None) -> str:
+
+def run_create_task(
+    subject: str, description: str = "", blockedBy: list[str] | None = None
+) -> str:
     task = create_task(subject, description, blockedBy)
     deps = f" (blockedBy: {', '.join(blockedBy)})" if blockedBy else ""
     print(f"  \033[34m[create] {task.subject}{deps}\033[0m")
@@ -1024,12 +1034,10 @@ def run_list_tasks() -> str:
         return "No tasks. Use create_task to add some."
     lines = []
     for t in tasks:
-        icon = {"pending": "○", "in_progress": "●",
-                "completed": "✓"}.get(t.status, "?")
+        icon = {"pending": "○", "in_progress": "●", "completed": "✓"}.get(t.status, "?")
         deps = f" (blockedBy: {', '.join(t.blockedBy)})" if t.blockedBy else ""
         owner = f" [{t.owner}]" if t.owner else ""
-        lines.append(f"  {icon} {t.id}: {t.subject} "
-                     f"[{t.status}]{owner}{deps}")
+        lines.append(f"  {icon} {t.id}: {t.subject} " f"[{t.status}]{owner}{deps}")
     return "\n".join(lines)
 
 
@@ -1046,6 +1054,7 @@ def run_claim_task(task_id: str) -> str:
 
 def run_complete_task(task_id: str) -> str:
     return complete_task(task_id)
+
 
 """ v2-v12 工具定义与分发映射 """
 
@@ -1151,34 +1160,51 @@ TOOLS = [
         "input_schema": {"type": "object", "properties": {"focus": {"type": "string"}}},
     },
     # v12 task工具
-    {"name": "create_task",
-     "description": "Create a new task with optional blockedBy dependencies.",
-     "input_schema": {"type": "object",
-                      "properties": {
-                          "subject": {"type": "string"},
-                          "description": {"type": "string"},
-                          "blockedBy": {"type": "array",
-                                        "items": {"type": "string"}}},
-                      "required": ["subject"]}},
-    {"name": "list_tasks",
-     "description": "List all tasks with status, owner, and dependencies.",
-     "input_schema": {"type": "object", "properties": {},
-                      "required": []}},
-    {"name": "get_task",
-     "description": "Get full details of a specific task by ID.",
-     "input_schema": {"type": "object",
-                      "properties": {"task_id": {"type": "string"}},
-                      "required": ["task_id"]}},
-    {"name": "claim_task",
-     "description": "Claim a pending task. Sets owner, changes status to in_progress.",
-     "input_schema": {"type": "object",
-                      "properties": {"task_id": {"type": "string"}},
-                      "required": ["task_id"]}},
-    {"name": "complete_task",
-     "description": "Complete an in-progress task. Reports unblocked downstream tasks.",
-     "input_schema": {"type": "object",
-                      "properties": {"task_id": {"type": "string"}},
-                      "required": ["task_id"]}},
+    {
+        "name": "create_task",
+        "description": "Create a new task with optional blockedBy dependencies.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "subject": {"type": "string"},
+                "description": {"type": "string"},
+                "blockedBy": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["subject"],
+        },
+    },
+    {
+        "name": "list_tasks",
+        "description": "List all tasks with status, owner, and dependencies.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "get_task",
+        "description": "Get full details of a specific task by ID.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "claim_task",
+        "description": "Claim a pending task. Sets owner, changes status to in_progress.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "complete_task",
+        "description": "Complete an in-progress task. Reports unblocked downstream tasks.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        },
+    },
 ]
 
 TOOL_HANDLERS = {
@@ -1190,8 +1216,10 @@ TOOL_HANDLERS = {
     "todo_write": run_todo_write,
     "task": spawn_subagent,
     "load_skill": load_skill,
-    "create_task": run_create_task, "list_tasks": run_list_tasks,
-    "get_task": run_get_task, "claim_task": run_claim_task,
+    "create_task": run_create_task,
+    "list_tasks": run_list_tasks,
+    "get_task": run_get_task,
+    "claim_task": run_claim_task,
     "complete_task": run_complete_task,
 }
 
@@ -1256,6 +1284,106 @@ SUB_HANDLERS = {
     "edit_file": run_edit,
     "glob": run_glob,
 }
+
+
+""" v13 背景task """
+
+_bg_counter = 0
+background_tasks: dict[str, dict] = {}  # bg_id → {tool_use_id, command, status}
+background_results: dict[str, str] = {}  # bg_id → output
+background_lock = threading.Lock()
+
+
+# 备用启发式函数：可能需要超过 30 秒的commands。
+def is_slow_operation(tool_name: str, tool_input: dict) -> bool:
+    if tool_name != "bash":
+        return False
+    cmd = tool_input.get("command", "").lower()
+    slow_keywords = [
+        "install",
+        "build",
+        "test",
+        "deploy",
+        "compile",
+        "docker build",
+        "pip install",
+        "npm install",
+        "cargo build",
+        "pytest",
+        "make",
+    ]
+    return any(kw in cmd for kw in slow_keywords)
+
+
+# 显式模型请求优先，否则回退到启发式函数
+def should_run_background(tool_name: str, tool_input: dict) -> bool:
+    if tool_input.get("run_in_background"):
+        return True
+    return is_slow_operation(tool_name, tool_input)
+
+
+# 执行工具调用块，返回输出。
+def execute_tool(block) -> str:
+    handler = TOOL_HANDLERS.get(block.name)
+    if handler:
+        return handler(**block.input)
+    return f"Unknown tool: {block.name}"
+
+
+# 在守护线程中运行工具，返回后台任务ID
+def start_background_task(block) -> str:
+    global _bg_counter
+    _bg_counter += 1
+    bg_id = f"bg_{_bg_counter:04d}"
+    cmd = block.input.get("command", block.name)
+
+    def worker():
+        result = execute_tool(block)
+        # with用于自动获取和释放锁，防止数据竞争
+        with background_lock:
+            background_tasks[bg_id]["status"] = "completed"
+            background_results[bg_id] = result
+
+    with background_lock:
+        background_tasks[bg_id] = {
+            "tool_use_id": block.id,
+            "command": cmd,
+            "status": "running",
+        }
+    # 创建守护进程，配置线程启动后执行worker函数
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    print(f"  \033[33m[background] dispatched {bg_id}: {cmd[:40]}\033[0m")
+    return bg_id
+
+
+# 收集已完成的后台结果作为 task_notification 消息
+def collect_background_results() -> list[str]:
+    with background_lock:
+        ready_ids = [
+            bid
+            for bid, task in background_tasks.items()
+            if task["status"] == "completed"
+        ]
+    notifications = []
+    for bg_id in ready_ids:
+        with background_lock:
+            task = background_tasks.pop(bg_id)
+            output = background_results.pop(bg_id, "")
+        summary = output[:200] if len(output) > 200 else output
+        notifications.append(
+            f"<task_notification>\n"
+            f"  <task_id>{bg_id}</task_id>\n"
+            f"  <status>completed</status>\n"
+            f"  <command>{task['command']}</command>\n"
+            f"  <summary>{summary}</summary>\n"
+            f"</task_notification>"
+        )
+        print(
+            f"  \033[32m[background done] {bg_id}: "
+            f"{task['command'][:40]} ({len(output)} chars)\033[0m"
+        )
+    return notifications
 
 
 """ v11 错误恢复 """
@@ -1474,6 +1602,7 @@ v5 提醒计数器
 v8 历史压缩管道
 v9 注入与提取记忆
 v10 组装与更新提示词
+v11 错误恢复
 """
 
 rounds_since_todo = 0
@@ -1704,6 +1833,24 @@ def agent_loop(messages: list, context: dict):
                 )
                 continue
 
+            if should_run_background(block.name, block.input):
+                bg_id = start_background_task(block)
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": f"[Background task {bg_id} started] "
+                        f"Command: {block.input.get('command', '')}. "
+                        f"Result will be available when complete.",
+                    }
+                )
+            else:
+                output = execute_tool(block)
+                print(str(output)[:300])
+                results.append(
+                    {"type": "tool_result", "tool_use_id": block.id, "content": output}
+                )
+
             handler = TOOL_HANDLERS.get(block.name)
             # "**"为解包字典，将字典的键值对作为关键字参数传递给函数
             output = handler(**block.input) if handler else f"Unknown: {block.name}"
@@ -1725,6 +1872,17 @@ def agent_loop(messages: list, context: dict):
             )
         # for-else结构，只有在 for 循环正常结束（没有 break）时才执行
         else:
+            # 在一条用户消息中注入工具结果 + 后台通知
+            user_content = list(results)
+            bg_notifications = collect_background_results()
+            if bg_notifications:
+                for notif in bg_notifications:
+                    user_content.append({"type": "text", "text": notif})
+                print(
+                    f"  \033[32m[inject] {len(bg_notifications)} background "
+                    f"notification(s)\033[0m"
+                )
+
             # 压缩未被调用
             # 将工具结果反馈回消息列表，循环继续
             messages.append({"role": "user", "content": results})
@@ -1738,7 +1896,7 @@ def agent_loop(messages: list, context: dict):
 
 
 if __name__ == "__main__":
-    print("Version 12: Task")
+    print("Version 13: Background Task")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     history = []
@@ -1746,7 +1904,7 @@ if __name__ == "__main__":
     context = update_context({}, [])
     while True:
         try:
-            query = input("\033[36ms12 >> \033[0m")
+            query = input("\033[36ms13 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):
@@ -1761,8 +1919,10 @@ if __name__ == "__main__":
         for msg in history[turn_start:]:
             if msg.get("role") != "assistant":
                 continue
-            # 遍历最终文本回复的内容块，打印文本部分（防御性检查）
-            for block in msg["content"]:
+            # 兼容sdk对象和纯字典
+            for block in history[-1]["content"]:
                 if getattr(block, "type", None) == "text":
                     print(block.text)
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    print(block.get("text", ""))
         print()
