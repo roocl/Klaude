@@ -1,4 +1,4 @@
-import ast, json, os, subprocess
+import ast, json, os, subprocess, time
 from pathlib import Path
 import yaml
 
@@ -14,6 +14,9 @@ if os.getenv("ANTHROPIC_BASE_URL"):
 
 WORKDIR = Path.cwd()
 SKILLS_DIR = WORKDIR / "skills"
+TRANSCRIPT_DIR = WORKDIR / ".transcripts"
+TOOL_RESULTS_DIR = WORKDIR / ".task_outputs" / "tool-results"
+
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 CURRENT_TODOS: list[dict] = []
@@ -38,7 +41,7 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
     return meta, parts[2].strip()
 
 
-# v6 启动时构建技能注册表
+# v7 启动时构建技能注册表
 SKILL_REGISTRY: dict[str, dict] = {}
 
 
@@ -92,9 +95,7 @@ SUB_SYSTEM = (
     "Do not delegate further."
 )
 
-""" 
-v2-v6 工具实现
-"""
+""" v2-v7 工具实现 """
 
 
 def safe_path(p: str) -> Path:
@@ -293,10 +294,155 @@ def load_skill(name: str) -> str:
         return f"Skill not found: {name}"
     return skill["content"]
 
+""" v8 四层压缩管道 """
 
-""" 
-v2-v6 工具定义与分发映射
-"""
+CONTEXT_LIMIT = 50000
+KEEP_RECENT_TOOL_RESULTS = 3
+# 超过阈值字符的工具结果将被持久化到磁盘中，避免占用上下文
+PERSIST_THRESHOLD = 30000
+
+# 估计消息内容长度
+def estimate_size(msgs): return len(str(msgs))
+
+# 获取消息块的类型
+def _block_type(block):
+    return block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+
+# 检查消息是否包含工具调用
+def _message_has_tool_use(msg):
+    if msg.get("role") != "assistant":
+        return False
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(_block_type(block) == "tool_use" for block in content)
+
+# 检查消息是否为工具结果消息
+def _is_tool_result_message(msg):
+    if msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(block, dict) and block.get("type") == "tool_result"
+               for block in content)
+
+
+# L1 snip compact， 裁掉中间无关的旧对话，保留首尾
+def snip_compact(messages, max_messages=50):
+    if len(messages) <= max_messages: return messages
+    keep_head, keep_tail = 3, max_messages - 3
+    head_end, tail_start = keep_head, len(messages) - keep_tail
+    # 如果首部最后一条消息是工具调用，则继续保留后续的工具结果消息
+    if head_end > 0 and _message_has_tool_use(messages[head_end - 1]):
+        while head_end < len(messages) and _is_tool_result_message(messages[head_end]):
+            head_end += 1
+    # 如果尾部第一条消息是工具结果，则继续保留前面的工具调用消息
+    # 对于head_end，一次回复可能包含多个工具调用和结果，所以用while遍历
+    # 对于tail_start，一个 tool_result 只对应一个 tool_use，用if就够了
+    if (tail_start > 0 and tail_start < len(messages)
+            and _is_tool_result_message(messages[tail_start])
+            and _message_has_tool_use(messages[tail_start - 1])):
+        tail_start -= 1
+    if head_end >= tail_start:
+        return messages
+    snipped = tail_start - head_end
+    return messages[:head_end] + [{"role": "user", "content": f"[snipped {snipped} messages]"}] + messages[tail_start:]
+
+# L2 micro compact，旧工具结果占位
+# 收集所有工具结果块
+def collect_tool_results(messages):
+    blocks = []
+    for mi, msg in enumerate(messages):
+        if msg.get("role") != "user" or not isinstance(msg.get("content"), list): continue
+        for bi, block in enumerate(msg["content"]):
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                blocks.append((mi, bi, block))
+    return blocks
+
+# 将旧工具结果替换为占位符
+def micro_compact(messages):
+    tool_results = collect_tool_results(messages)
+    if len(tool_results) <= KEEP_RECENT_TOOL_RESULTS: return messages
+    # "_,"为丢弃变量，表示该值不需要
+    for _, _, block in tool_results[:-KEEP_RECENT_TOOL_RESULTS]:
+        if len(block.get("content", "")) > 120:
+            block["content"] = "[Earlier tool result compacted. Re-run if needed.]"
+    return messages
+
+# L3 tool result budget，保存大型结果到磁盘中
+def persist_large_output(tool_use_id, output):
+    if len(output) <= PERSIST_THRESHOLD: return output
+    TOOL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = TOOL_RESULTS_DIR / f"{tool_use_id}.txt"
+    if not path.exists(): path.write_text(output, encoding="utf-8")
+    return f"<persisted-output>\nFull output: {path}\nPreview:\n{output[:2000]}\n</persisted-output>"
+
+def tool_result_budget(messages, max_bytes=200_000):
+    last = messages[-1] if messages else None
+    if not last or last.get("role") != "user" or not isinstance(last.get("content"), list): return messages
+    blocks = [(i, b) for i, b in enumerate(last["content"]) if isinstance(b, dict) and b.get("type") == "tool_result"]
+    # 统计最后一条 user 消息里所有 tool_result 的总大小
+    total = sum(len(str(b.get("content", ""))) for _, b in blocks)
+    if total <= max_bytes: return messages
+    # 按content长度降序排列blocks，优先处理最大的输出
+    ranked = sorted(blocks, key=lambda p: len(str(p[1].get("content", ""))), reverse=True)
+    for _, block in ranked:
+        if total <= max_bytes: break
+        content = str(block.get("content", ""))
+        if len(content) <= PERSIST_THRESHOLD: continue
+        tid = block.get("tool_use_id", "unknown")
+        # 将大型输出持久化到磁盘，并替换为占位符
+        block["content"] = persist_large_output(tid, content)
+        # 重新计算总大小，一旦小于阈值就停止处理
+        total = sum(len(str(b.get("content", ""))) for _, b in blocks)
+    return messages
+
+# L4 auto compact，llm全量摘要
+# 将完整消息写入磁盘，返回文件路径
+def write_transcript(messages):
+    TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+    path = TRANSCRIPT_DIR / f"transcript_{int(time.time())}.jsonl"
+    with path.open("w", encoding="utf-8") as f:
+        for msg in messages: f.write(json.dumps(msg, default=str) + "\n")
+    return path
+
+def summarize_history(messages):
+    # 对话开头往往包含用户需求、初始决策等最重要的信息，而末尾多为执行日志，因此保留前段信息比保留后段信息好
+    conversation = json.dumps(messages, default=str)[:80000]
+    prompt = ("Summarize this coding-agent conversation so work can continue.\n"
+              "Preserve: 1. current goal, 2. key findings/decisions, 3. files read/changed, "
+              "4. remaining work, 5. user constraints.\nBe compact but concrete.\n\n" + conversation)
+    response = client.messages.create(model=MODEL, messages=[{"role": "user", "content": prompt}], max_tokens=2000)
+    return "\n".join(
+        # 获取文本块的内容，忽略非文本块的工具调用
+        getattr(block, "text", "")
+        for block in response.content
+        # 如果返回的内容块中没有文本块，则返回固定字符串
+        if getattr(block, "type", None) == "text").strip() or "(empty summary)"
+
+# 保存完整对话，返回压缩后的摘要消息
+def compact_history(messages):
+    transcript_path = write_transcript(messages)
+    print(f"[transcript saved: {transcript_path}]")
+    summary = summarize_history(messages)
+    return [{"role": "user", "content": f"[Compacted]\n\n{summary}"}]
+
+# 紧急压缩 reactive Compact，在API错误时使用
+def reactive_compact(messages):
+    transcript = write_transcript(messages)
+    # 从尾部进行回退，保留最后5条消息，前面的消息进行摘要
+    tail_start = max(0, len(messages) - 5)
+    # 避免留下孤立tool_result
+    if (tail_start > 0 and tail_start < len(messages)
+            and _is_tool_result_message(messages[tail_start])
+            and _message_has_tool_use(messages[tail_start - 1])):
+        tail_start -= 1
+    summary = summarize_history(messages[:tail_start])
+    return [{"role": "user", "content": f"[Reactive compact]\n\n{summary}"}, *messages[tail_start:]]
+
+
+""" v2-v8 工具定义与分发映射 """
 
 TOOLS = [
     {
@@ -393,6 +539,12 @@ TOOLS = [
             "required": ["name"],
         },
     },
+    # v8 compact工具
+    {
+        "name": "compact",
+        "description": "Summarize earlier conversation to free context space.",
+        "input_schema": {"type": "object", "properties": {"focus": {"type": "string"}}},
+    },
 ]
 
 TOOL_HANDLERS = {
@@ -406,7 +558,7 @@ TOOL_HANDLERS = {
     "load_skill": load_skill,
 }
 
-""" v6 子agent工具定义与映射 """
+""" v8 子agent工具定义与映射 """
 
 SUB_TOOLS = [
     {
@@ -567,19 +719,23 @@ register_hook("PostToolUse", large_output_hook)
 register_hook("UserPromptSubmit", context_inject_hook)
 register_hook("Stop", summary_hook)
 
-
 """ 
 v2 修改工具执行部分
 v3 插入检查权限函数
 v4 插入hook触发
 v5 提醒计数器
+v8 历史压缩管道
 """
 
 rounds_since_todo = 0
 
+MAX_REACTIVE_RETRIES = 1
 
 def agent_loop(messages: list):
     global rounds_since_todo
+    
+    reactive_retries = 0
+    
     while True:
         # 每轮循环前检查是否需要提醒更新todo列表
         if rounds_since_todo >= 3 and messages:
@@ -587,15 +743,38 @@ def agent_loop(messages: list):
                 {"role": "user", "content": "<reminder>Update your todos.</reminder>"}
             )
             rounds_since_todo = 0
-
-        # 首次循环仅有用户提问，之后循环包含助手回复与工具结果
-        response = client.messages.create(
-            model=MODEL,
-            system=SYSTEM,
-            messages=messages,
-            tools=TOOLS,
-            max_tokens=8000,
-        )
+        
+        # v8 执行顺序：L3 budget → L1 snip → L2 micro
+        # L3（budget）必须在 L2（micro）前面，先对内容落盘，再替换旧工具结果为占位符
+        # "[:]"为原地替换，直接修改原列表的内容
+        messages[:] = tool_result_budget(messages) 
+        messages[:] = snip_compact(messages)
+        messages[:] = micro_compact(messages)
+        
+        # v8 当tokens仍然超过阈值时调用llm进行总结——框架兜底
+        if estimate_size(messages) > CONTEXT_LIMIT:
+            print("[auto compact]")
+            messages[:] = compact_history(messages)
+        
+        try:
+            # 首次循环仅有用户提问，之后循环包含助手回复与工具结果
+            response = client.messages.create(
+                model=MODEL,
+                system=SYSTEM,
+                messages=messages,
+                tools=TOOLS,
+                max_tokens=8000,
+            )
+            reactive_retries = 0
+        # 当api返回 context 超长错误且还没达到最大重试次数时，进行reactive compact
+        except Exception as e:
+            if ("prompt_too_long" in str(e).lower() or "too many tokens" in str(e).lower()) and reactive_retries < MAX_REACTIVE_RETRIES:
+                print("[reactive compact]")
+                messages[:] = reactive_compact(messages)
+                reactive_retries += 1
+                continue
+            # raise 单独使用（不带异常对象）会重新抛出当前捕获的异常,让上层（__main__）处理，程序最终会崩溃退出而不是卡在死循环里
+            raise
 
         # 将助手的回复添加到消息列表中
         messages.append({"role": "assistant", "content": response.content})
@@ -634,6 +813,7 @@ def agent_loop(messages: list):
         for block in response.content:
             if block.type != "tool_use":
                 continue
+            print(f"\033[36m> {block.name}\033[0m")
 
             # v4 hook代替v3权限检验，PreToolUse出现问题就打印反馈给模型，继续下一次循环
             blocked = trigger_hooks("PreToolUse", block)
@@ -647,6 +827,20 @@ def agent_loop(messages: list):
                 )
                 continue
 
+            # v8 模型认为上下文太长时主动压缩——模型自主控制
+            if block.name == "compact":
+                messages[:] = compact_history(messages)
+                results.append({"type": "tool_result", "tool_use_id": block.id,
+                                "content": "[Compacted. Conversation history has been summarized.]"})
+                messages.append({"role": "user", "content": results})
+                # 结束当前轮次，从压缩上下文中重新开始
+                break
+
+            blocked = trigger_hooks("PreToolUse", block)
+            if blocked:
+                results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(blocked)})
+                continue
+            
             handler = TOOL_HANDLERS.get(block.name)
             # "**"为解包字典，将字典的键值对作为关键字参数传递给函数
             output = handler(**block.input) if handler else f"Unknown: {block.name}"
@@ -658,6 +852,7 @@ def agent_loop(messages: list):
             if block.name == "todo_write":
                 rounds_since_todo = 0
 
+            print(str(output)[:200])
             results.append(
                 {
                     "type": "tool_result",
@@ -665,19 +860,24 @@ def agent_loop(messages: list):
                     "content": output,
                 }
             )
-
-        # 将工具结果反馈回消息列表，循环继续
-        messages.append({"role": "user", "content": results})
+        # for-else结构，只有在 for 循环正常结束（没有 break）时才执行
+        else:
+            # 压缩未被调用
+            # 将工具结果反馈回消息列表，循环继续
+            messages.append({"role": "user", "content": results})
+            continue
+        # 压缩被调用，results已附加到上方，继续下一轮while，不能再继续处理其他 block
+        continue
 
 
 if __name__ == "__main__":
-    print("Version 7: Skills")
+    print("Version 8: Context Compact")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     history = []
     while True:
         try:
-            query = input("\033[36ms07 >> \033[0m")
+            query = input("\033[36ms08 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):
