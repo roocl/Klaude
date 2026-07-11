@@ -1,4 +1,4 @@
-import ast, json, os, subprocess, time
+import ast, json, os, subprocess, time, re
 from pathlib import Path
 import yaml
 
@@ -13,17 +13,323 @@ if os.getenv("ANTHROPIC_BASE_URL"):
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
 WORKDIR = Path.cwd()
+TOOL_RESULTS_DIR = WORKDIR / ".task_outputs" / "tool-results"
 SKILLS_DIR = WORKDIR / "skills"
 TRANSCRIPT_DIR = WORKDIR / ".transcripts"
-TOOL_RESULTS_DIR = WORKDIR / ".task_outputs" / "tool-results"
+MEMORY_DIR = WORKDIR / ".memory"
+MEMORY_DIR.mkdir(exist_ok=True)
+MEMORY_INDEX = MEMORY_DIR / "MEMORY.md"
 
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 CURRENT_TODOS: list[dict] = []
 
+""" v9 记忆系统 """
+
+MEMORY_TYPES = ["user", "feedback", "project", "reference"]
+
+
+def _memory_parse_frontmatter(text: str) -> tuple[dict, str]:
+    if not text.startswith("---"):
+        return {}, text
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}, text
+    meta = {}
+    for line in parts[1].strip().splitlines():
+        # 只处理有冒号的行
+        if ":" in line:
+            # 按第一个冒号分割
+            k, v = line.split(":", 1)
+            meta[k.strip()] = v.strip().strip('"').strip("'")
+    return meta, parts[2].strip()
+
+
+# 将记忆写入文档
+def write_memory_file(name: str, mem_type: str, description: str, body: str):
+    slug = name.lower().replace(" ", "-").replace("/", "-")
+    filename = f"{slug}.md"
+    filepath = MEMORY_DIR / filename
+    filepath.write_text(
+        f"---\nname: {name}\ndescription: {description}\ntype: {mem_type}\n---\n\n{body}\n"
+    )
+    # 重建索引
+    _rebuild_index()
+    return filepath
+
+
+# 从所有记忆文档中重建MEMORY.md索引
+def _rebuild_index():
+    lines = []
+    for f in sorted(MEMORY_DIR.glob("*.md")):
+        if f.name == "MEMORY.md":
+            continue
+        raw = f.read_text()
+        meta, body = _memory_parse_frontmatter(raw)
+        name = meta.get("name", f.stem)
+        desc = meta.get("description", body.split("\n")[0][:80])
+        lines.append(f"- [{name}]({f.name}) — {desc}")
+    MEMORY_INDEX.write_text("\n".join(lines) + "\n" if lines else "")
+
+
+# 阅读MEMORY.md索引（每轮注入到系统提示词中）
+def read_memory_index() -> str:
+    if not MEMORY_INDEX.exists():
+        return ""
+    text = MEMORY_INDEX.read_text().strip()
+    return text if text else ""
+
+
+# 阅读记忆文档全文
+def read_memory_file(filename: str) -> str | None:
+    path = MEMORY_DIR / filename
+    if not path.exists():
+        return None
+    return path.read_text()
+
+
+# 列出所有记忆文档的元数据
+def list_memory_files() -> list[dict]:
+    result = []
+    for f in sorted(MEMORY_DIR.glob("*.md")):
+        if f.name == "MEMORY.md":
+            continue
+        raw = f.read_text()
+        meta, body = _memory_parse_frontmatter(raw)
+        result.append(
+            {
+                "filename": f.name,
+                # f.stem返回不带拓展名的文件名
+                "name": meta.get("name", f.stem),
+                "description": meta.get("description", ""),
+                "type": meta.get("type", "user"),
+                "body": body,
+            }
+        )
+    return result
+
+
+# 通过将最近的对话与记忆名称/描述进行匹配，选择相关的记忆文件名
+# 使用简单的llm调用或回退到名字+描述的关键词匹配
+def select_relevant_memories(messages: list, max_items: int = 5) -> list[str]:
+    files = list_memory_files()
+    if not files:
+        return []
+
+    # 收集用户最近的文本以获取上下文信息
+    recent_texts = []
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            # 处理工具结果
+            if isinstance(content, list):
+                content = " ".join(
+                    # 推导式语法：<输出表达式>  for <变量> in <可迭代对象>  if <过滤条件>
+                    # 此处的意思是遍历content，保留其中type为text的块，并提取text的属性
+                    str(getattr(b, "text", ""))
+                    for b in content
+                    if getattr(b, "type", None) == "text"
+                )
+            # 处理普通提问
+            if isinstance(content, str):
+                recent_texts.append(content)
+            if len(recent_texts) >= 3:
+                break
+    recent = " ".join(reversed(recent_texts))[:2000]
+
+    if not recent.strip():
+        return []
+
+    # 构建名称+描述的目录，以供llm选用
+    catalog_lines = []
+    for i, f in enumerate(files):
+        catalog_lines.append(f"{i}: {f['name']} — {f['description']}")
+    catalog = "\n".join(catalog_lines)
+
+    prompt = (
+        "Given the recent conversation and the memory catalog below, "
+        "select the indices of memories that are clearly relevant. "
+        "Return ONLY a JSON array of integers, e.g. [0, 3]. "
+        "If none are relevant, return [].\n\n"
+        f"Recent conversation:\n{recent}\n\n"
+        f"Memory catalog:\n{catalog}"
+    )
+
+    try:
+        response = client.messages.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+        )
+        text = extract_text(response.content).strip()
+        # 用正则 \[.*?\] 在 llm 回复中匹配第一个 [...] 形式的数组
+        match = re.search(r"\[.*?\]", text, re.DOTALL)
+        if match:
+            # 将json数组解析成python列表
+            indices = json.loads(match.group())
+            selected = []
+            for idx in indices:
+                if isinstance(idx, int) and 0 <= idx < len(files):
+                    # 获取对应记忆文档名
+                    selected.append(files[idx]["filename"])
+                    if len(selected) >= max_items:
+                        break
+            return selected
+    except Exception:
+        pass
+
+    # 切分最近用户文本以获取词集
+    keywords = [w.lower() for w in recent.split() if len(w) > 3]
+    selected = []
+    for f in files:
+        text = (f["name"] + " " + f["description"]).lower()
+        # 如果有关键词在名称或描述中
+        if any(kw in text for kw in keywords):
+            selected.append(f["filename"])
+            if len(selected) >= max_items:
+                break
+    return selected
+
+
+# 读取相关的具体记忆内容并注入到上下文中
+def load_memories(messages: list) -> str:
+    selected_files = select_relevant_memories(messages)
+    if not selected_files:
+        return ""
+
+    parts = ["<relevant_memories>"]
+    for filename in selected_files:
+        content = read_memory_file(filename)
+        if content:
+            parts.append(content)
+    parts.append("</relevant_memories>")
+    return "\n\n".join(parts)
+
+
+# 在每个轮次之后从最近对话里提取新的记忆
+def extract_memories(messages: list):
+    # 收集最近对话文本
+    dialogue_parts = []
+    for msg in messages[-10:]:
+        role = msg.get("role", "?")
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                str(getattr(b, "text", ""))
+                for b in content
+                if getattr(b, "type", None) == "text"
+            )
+        if isinstance(content, str) and content.strip():
+            dialogue_parts.append(f"{role}: {content}")
+    dialogue = "\n".join(dialogue_parts)
+
+    if not dialogue.strip():
+        return
+
+    # 检查现有记忆，防止重复
+    existing = list_memory_files()
+    existing_desc = (
+        "\n".join(f"- {m['name']}: {m['description']}" for m in existing)
+        if existing
+        else "(none)"
+    )
+
+    prompt = (
+        "Extract user preferences, constraints, or project facts from this dialogue.\n"
+        "Return a JSON array. Each item: {name, type, description, body}.\n"
+        "- name: short kebab-case identifier (e.g. 'user-preference-tabs')\n"
+        "- type: one of 'user' (user preference), 'feedback' (guidance), "
+        "'project' (project fact), 'reference' (external pointer)\n"
+        "- description: one-line summary for index lookup\n"
+        "- body: full detail in markdown\n"
+        "If nothing new or already covered by existing memories, return [].\n\n"
+        f"Existing memories:\n{existing_desc}\n\n"
+        f"Dialogue:\n{dialogue[:4000]}"
+    )
+
+    try:
+        response = client.messages.create(
+            model=MODEL, messages=[{"role": "user", "content": prompt}], max_tokens=800
+        )
+        text = extract_text(response.content).strip()
+        # 从response中提取json数组
+        match = re.search(r"\[.*\]", text, re.DOTALL)
+        if not match:
+            return
+        # 转换成python列表
+        items = json.loads(match.group())
+        if not items:
+            return
+        count = 0
+        for mem in items:
+            name = mem.get("name", f"memory_{int(time.time())}")
+            mem_type = mem.get("type", "user")
+            desc = mem.get("description", "")
+            body = mem.get("body", "")
+            if desc and body:
+                write_memory_file(name, mem_type, desc, body)
+                count += 1
+        if count:
+            print(f"\n\033[33m[Memory: extracted {count} new memories]\033[0m")
+    except Exception:
+        pass
+
+# 合并阈值
+CONSOLIDATE_THRESHOLD = 10
+
+# 合并重复/过期的记忆，当文件数量≥阈值时触发
+def consolidate_memories():
+    files = list_memory_files()
+    if len(files) < CONSOLIDATE_THRESHOLD:
+        return
+
+    catalog = "\n\n".join(
+        f"## {f['filename']}\nname: {f['name']}\ndescription: {f['description']}\n{f['body']}"
+        for f in files
+    )
+
+    prompt = (
+        "Consolidate the following memory files. Rules:\n"
+        "1. Merge duplicates into one\n"
+        "2. Remove outdated/contradicted memories\n"
+        "3. Keep the total under 30 memories\n"
+        "4. Preserve important user preferences above all\n"
+        "Return a JSON array. Each item: {name, type, description, body}.\n\n"
+        f"{catalog[:16000]}"
+    )
+
+    try:
+        response = client.messages.create(
+            model=MODEL, messages=[{"role": "user", "content": prompt}], max_tokens=3000
+        )
+        text = extract_text(response.content).strip()
+        match = re.search(r"\[.*\]", text, re.DOTALL)
+        if not match:
+            return
+        items = json.loads(match.group())
+
+        # 删除旧记忆文档
+        for f in MEMORY_DIR.glob("*.md"):
+            if f.name != "MEMORY.md":
+                f.unlink()
+
+        for mem in items:
+            name = mem.get("name", f"memory_{int(time.time())}")
+            mem_type = mem.get("type", "user")
+            desc = mem.get("description", "")
+            body = mem.get("body", "")
+            if desc and body:
+                write_memory_file(name, mem_type, desc, body)
+
+        print(
+            f"\n\033[33m[Memory: consolidated {len(files)} → {len(items)} memories]\033[0m"
+        )
+    except Exception:
+        pass
+
 
 # v7 扫描skill目录，解析每个SKILL.md的YAML frontmatter，生成技能列表
-def _parse_frontmatter(text: str) -> tuple[dict, str]:
+def _skill_parse_frontmatter(text: str) -> tuple[dict, str]:
     # 如果文本不以 "---" 开头，说明没有 frontmatter，返回空字典和原始文本
     if not text.startswith("---"):
         return {}, text
@@ -56,7 +362,7 @@ def _scan_skills():
         manifest = d / "SKILL.md"
         if manifest.exists():
             raw = manifest.read_text()
-            meta, body = _parse_frontmatter(raw)
+            meta, body = _skill_parse_frontmatter(raw)
             name = meta.get("name", d.name)
             desc = meta.get("description", raw.split("\n")[0].lstrip("#").strip())
             SKILL_REGISTRY[name] = {"name": name, "description": desc, "content": raw}
@@ -77,16 +383,21 @@ def list_skills() -> str:
 
 
 # v7 启动时构建SYSTEM提示词，并注入技能目录
+# v9 注入记忆索引
 def build_system() -> str:
     catalog = list_skills()
+
+    index = read_memory_index()
+    memories_section = f"\n\nMemories available:\n{index}" if index else ""
     return (
         f"You are a coding agent at {WORKDIR}. "
         f"Skills available:\n{catalog}\n"
-        "Use load_skill to get full details when needed."
+        "Use load_skill to get full details when needed.\n"
+        f"{memories_section}\n"
+        "Relevant memories are injected below. Respect user preferences from memory.\n"
+        "When the user says 'remember' or expresses a clear preference, extract it as a memory."
     )
 
-
-SYSTEM = build_system()
 
 # v6 子系统提示词
 SUB_SYSTEM = (
@@ -294,6 +605,7 @@ def load_skill(name: str) -> str:
         return f"Skill not found: {name}"
     return skill["content"]
 
+
 """ v8 四层压缩管道 """
 
 CONTEXT_LIMIT = 50000
@@ -301,12 +613,18 @@ KEEP_RECENT_TOOL_RESULTS = 3
 # 超过阈值字符的工具结果将被持久化到磁盘中，避免占用上下文
 PERSIST_THRESHOLD = 30000
 
+
 # 估计消息内容长度
-def estimate_size(msgs): return len(str(msgs))
+def estimate_size(msgs):
+    return len(str(msgs))
+
 
 # 获取消息块的类型
 def _block_type(block):
-    return block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+    return (
+        block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+    )
+
 
 # 检查消息是否包含工具调用
 def _message_has_tool_use(msg):
@@ -317,6 +635,7 @@ def _message_has_tool_use(msg):
         return False
     return any(_block_type(block) == "tool_use" for block in content)
 
+
 # 检查消息是否为工具结果消息
 def _is_tool_result_message(msg):
     if msg.get("role") != "user":
@@ -324,13 +643,16 @@ def _is_tool_result_message(msg):
     content = msg.get("content")
     if not isinstance(content, list):
         return False
-    return any(isinstance(block, dict) and block.get("type") == "tool_result"
-               for block in content)
+    return any(
+        isinstance(block, dict) and block.get("type") == "tool_result"
+        for block in content
+    )
 
 
 # L1 snip compact， 裁掉中间无关的旧对话，保留首尾
 def snip_compact(messages, max_messages=50):
-    if len(messages) <= max_messages: return messages
+    if len(messages) <= max_messages:
+        return messages
     keep_head, keep_tail = 3, max_messages - 3
     head_end, tail_start = keep_head, len(messages) - keep_tail
     # 如果首部最后一条消息是工具调用，则继续保留后续的工具结果消息
@@ -340,57 +662,86 @@ def snip_compact(messages, max_messages=50):
     # 如果尾部第一条消息是工具结果，则继续保留前面的工具调用消息
     # 对于head_end，一次回复可能包含多个工具调用和结果，所以用while遍历
     # 对于tail_start，一个 tool_result 只对应一个 tool_use，用if就够了
-    if (tail_start > 0 and tail_start < len(messages)
-            and _is_tool_result_message(messages[tail_start])
-            and _message_has_tool_use(messages[tail_start - 1])):
+    if (
+        tail_start > 0
+        and tail_start < len(messages)
+        and _is_tool_result_message(messages[tail_start])
+        and _message_has_tool_use(messages[tail_start - 1])
+    ):
         tail_start -= 1
     if head_end >= tail_start:
         return messages
     snipped = tail_start - head_end
-    return messages[:head_end] + [{"role": "user", "content": f"[snipped {snipped} messages]"}] + messages[tail_start:]
+    return (
+        messages[:head_end]
+        + [{"role": "user", "content": f"[snipped {snipped} messages]"}]
+        + messages[tail_start:]
+    )
+
 
 # L2 micro compact，旧工具结果占位
 # 收集所有工具结果块
 def collect_tool_results(messages):
     blocks = []
     for mi, msg in enumerate(messages):
-        if msg.get("role") != "user" or not isinstance(msg.get("content"), list): continue
+        if msg.get("role") != "user" or not isinstance(msg.get("content"), list):
+            continue
         for bi, block in enumerate(msg["content"]):
             if isinstance(block, dict) and block.get("type") == "tool_result":
                 blocks.append((mi, bi, block))
     return blocks
 
+
 # 将旧工具结果替换为占位符
 def micro_compact(messages):
     tool_results = collect_tool_results(messages)
-    if len(tool_results) <= KEEP_RECENT_TOOL_RESULTS: return messages
+    if len(tool_results) <= KEEP_RECENT_TOOL_RESULTS:
+        return messages
     # "_,"为丢弃变量，表示该值不需要
     for _, _, block in tool_results[:-KEEP_RECENT_TOOL_RESULTS]:
         if len(block.get("content", "")) > 120:
             block["content"] = "[Earlier tool result compacted. Re-run if needed.]"
     return messages
 
+
 # L3 tool result budget，保存大型结果到磁盘中
 def persist_large_output(tool_use_id, output):
-    if len(output) <= PERSIST_THRESHOLD: return output
+    if len(output) <= PERSIST_THRESHOLD:
+        return output
     TOOL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     path = TOOL_RESULTS_DIR / f"{tool_use_id}.txt"
-    if not path.exists(): path.write_text(output, encoding="utf-8")
+    if not path.exists():
+        path.write_text(output, encoding="utf-8")
     return f"<persisted-output>\nFull output: {path}\nPreview:\n{output[:2000]}\n</persisted-output>"
+
 
 def tool_result_budget(messages, max_bytes=200_000):
     last = messages[-1] if messages else None
-    if not last or last.get("role") != "user" or not isinstance(last.get("content"), list): return messages
-    blocks = [(i, b) for i, b in enumerate(last["content"]) if isinstance(b, dict) and b.get("type") == "tool_result"]
+    if (
+        not last
+        or last.get("role") != "user"
+        or not isinstance(last.get("content"), list)
+    ):
+        return messages
+    blocks = [
+        (i, b)
+        for i, b in enumerate(last["content"])
+        if isinstance(b, dict) and b.get("type") == "tool_result"
+    ]
     # 统计最后一条 user 消息里所有 tool_result 的总大小
     total = sum(len(str(b.get("content", ""))) for _, b in blocks)
-    if total <= max_bytes: return messages
+    if total <= max_bytes:
+        return messages
     # 按content长度降序排列blocks，优先处理最大的输出
-    ranked = sorted(blocks, key=lambda p: len(str(p[1].get("content", ""))), reverse=True)
+    ranked = sorted(
+        blocks, key=lambda p: len(str(p[1].get("content", ""))), reverse=True
+    )
     for _, block in ranked:
-        if total <= max_bytes: break
+        if total <= max_bytes:
+            break
         content = str(block.get("content", ""))
-        if len(content) <= PERSIST_THRESHOLD: continue
+        if len(content) <= PERSIST_THRESHOLD:
+            continue
         tid = block.get("tool_use_id", "unknown")
         # 将大型输出持久化到磁盘，并替换为占位符
         block["content"] = persist_large_output(tid, content)
@@ -398,28 +749,41 @@ def tool_result_budget(messages, max_bytes=200_000):
         total = sum(len(str(b.get("content", ""))) for _, b in blocks)
     return messages
 
+
 # L4 auto compact，llm全量摘要
 # 将完整消息写入磁盘，返回文件路径
 def write_transcript(messages):
     TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
     path = TRANSCRIPT_DIR / f"transcript_{int(time.time())}.jsonl"
     with path.open("w", encoding="utf-8") as f:
-        for msg in messages: f.write(json.dumps(msg, default=str) + "\n")
+        for msg in messages:
+            f.write(json.dumps(msg, default=str) + "\n")
     return path
+
 
 def summarize_history(messages):
     # 对话开头往往包含用户需求、初始决策等最重要的信息，而末尾多为执行日志，因此保留前段信息比保留后段信息好
     conversation = json.dumps(messages, default=str)[:80000]
-    prompt = ("Summarize this coding-agent conversation so work can continue.\n"
-              "Preserve: 1. current goal, 2. key findings/decisions, 3. files read/changed, "
-              "4. remaining work, 5. user constraints.\nBe compact but concrete.\n\n" + conversation)
-    response = client.messages.create(model=MODEL, messages=[{"role": "user", "content": prompt}], max_tokens=2000)
-    return "\n".join(
-        # 获取文本块的内容，忽略非文本块的工具调用
-        getattr(block, "text", "")
-        for block in response.content
-        # 如果返回的内容块中没有文本块，则返回固定字符串
-        if getattr(block, "type", None) == "text").strip() or "(empty summary)"
+    prompt = (
+        "Summarize this coding-agent conversation so work can continue.\n"
+        "Preserve: 1. current goal, 2. key findings/decisions, 3. files read/changed, "
+        "4. remaining work, 5. user constraints.\nBe compact but concrete.\n\n"
+        + conversation
+    )
+    response = client.messages.create(
+        model=MODEL, messages=[{"role": "user", "content": prompt}], max_tokens=2000
+    )
+    return (
+        "\n".join(
+            # 获取文本块的内容，忽略非文本块的工具调用
+            getattr(block, "text", "")
+            for block in response.content
+            # 如果返回的内容块中没有文本块，则返回固定字符串
+            if getattr(block, "type", None) == "text"
+        ).strip()
+        or "(empty summary)"
+    )
+
 
 # 保存完整对话，返回压缩后的摘要消息
 def compact_history(messages):
@@ -428,18 +792,25 @@ def compact_history(messages):
     summary = summarize_history(messages)
     return [{"role": "user", "content": f"[Compacted]\n\n{summary}"}]
 
+
 # 紧急压缩 reactive Compact，在API错误时使用
 def reactive_compact(messages):
     transcript = write_transcript(messages)
     # 从尾部进行回退，保留最后5条消息，前面的消息进行摘要
     tail_start = max(0, len(messages) - 5)
     # 避免留下孤立tool_result
-    if (tail_start > 0 and tail_start < len(messages)
-            and _is_tool_result_message(messages[tail_start])
-            and _message_has_tool_use(messages[tail_start - 1])):
+    if (
+        tail_start > 0
+        and tail_start < len(messages)
+        and _is_tool_result_message(messages[tail_start])
+        and _message_has_tool_use(messages[tail_start - 1])
+    ):
         tail_start -= 1
     summary = summarize_history(messages[:tail_start])
-    return [{"role": "user", "content": f"[Reactive compact]\n\n{summary}"}, *messages[tail_start:]]
+    return [
+        {"role": "user", "content": f"[Reactive compact]\n\n{summary}"},
+        *messages[tail_start:],
+    ]
 
 
 """ v2-v8 工具定义与分发映射 """
@@ -725,50 +1096,91 @@ v3 插入检查权限函数
 v4 插入hook触发
 v5 提醒计数器
 v8 历史压缩管道
+v9 注入与提取记忆
 """
 
 rounds_since_todo = 0
 
 MAX_REACTIVE_RETRIES = 1
 
+
 def agent_loop(messages: list):
     global rounds_since_todo
-    
     reactive_retries = 0
-    
+
+    # v9 注入相关记忆到当前用户轮次中（消息记录的最后一条）
+    memories_content = load_memories(messages)
+    memory_turn = (
+        len(messages) - 1
+        if messages and isinstance(messages[-1].get("content"), str)
+        else None
+    )
+    # v9 每个用户轮次构建一次系统提示词；循环结束后更新记忆
+    system = build_system()
+
     while True:
+        # v9 保存压缩前的快照以便提取精确的记忆
+        pre_compress = [
+            (
+                m
+                if isinstance(m, dict)
+                else {"role": m.get("role", ""), "content": str(m.get("content", ""))}
+            )
+            for m in messages
+        ]
+
+        # v8 执行顺序：L3 budget → L1 snip → L2 micro
+        # L3（budget）必须在 L2（micro）前面，先对内容落盘，再替换旧工具结果为占位符
+        # "[:]"为原地替换，直接修改原列表的内容
+        messages[:] = tool_result_budget(messages)
+        messages[:] = snip_compact(messages)
+        messages[:] = micro_compact(messages)
+
+        # v8 当tokens仍然超过阈值时调用llm进行总结——框架兜底
+        if estimate_size(messages) > CONTEXT_LIMIT:
+            print("[auto compact]")
+            messages[:] = compact_history(messages)
+
         # 每轮循环前检查是否需要提醒更新todo列表
+        # 先压缩，后提醒
         if rounds_since_todo >= 3 and messages:
             messages.append(
                 {"role": "user", "content": "<reminder>Update your todos.</reminder>"}
             )
             rounds_since_todo = 0
-        
-        # v8 执行顺序：L3 budget → L1 snip → L2 micro
-        # L3（budget）必须在 L2（micro）前面，先对内容落盘，再替换旧工具结果为占位符
-        # "[:]"为原地替换，直接修改原列表的内容
-        messages[:] = tool_result_budget(messages) 
-        messages[:] = snip_compact(messages)
-        messages[:] = micro_compact(messages)
-        
-        # v8 当tokens仍然超过阈值时调用llm进行总结——框架兜底
-        if estimate_size(messages) > CONTEXT_LIMIT:
-            print("[auto compact]")
-            messages[:] = compact_history(messages)
-        
+
         try:
+            request_messages = messages
+            if (
+                memories_content
+                and memory_turn is not None
+                and memory_turn < len(messages)  # 防止压缩后索引越界
+            ):
+                # 需要注入记忆，创建原对象的浅拷贝，避免修改
+                request_messages = messages.copy()
+                # 第一个参数展开全部键值对，第二个参数仅修改content字段
+                request_messages[memory_turn] = {
+                    **messages[memory_turn],
+                    "content": memories_content
+                    + "\n\n"
+                    + messages[memory_turn]["content"],
+                }
+
             # 首次循环仅有用户提问，之后循环包含助手回复与工具结果
             response = client.messages.create(
                 model=MODEL,
-                system=SYSTEM,
-                messages=messages,
+                system=system,
+                messages=request_messages,
                 tools=TOOLS,
                 max_tokens=8000,
             )
             reactive_retries = 0
         # 当api返回 context 超长错误且还没达到最大重试次数时，进行reactive compact
         except Exception as e:
-            if ("prompt_too_long" in str(e).lower() or "too many tokens" in str(e).lower()) and reactive_retries < MAX_REACTIVE_RETRIES:
+            if (
+                "prompt_too_long" in str(e).lower()
+                or "too many tokens" in str(e).lower()
+            ) and reactive_retries < MAX_REACTIVE_RETRIES:
                 print("[reactive compact]")
                 messages[:] = reactive_compact(messages)
                 reactive_retries += 1
@@ -780,6 +1192,10 @@ def agent_loop(messages: list):
         messages.append({"role": "assistant", "content": response.content})
 
         if response.stop_reason != "tool_use":
+            # v9 从压缩前快照中提取完整记忆
+            extract_memories(pre_compress)
+            consolidate_memories()
+
             force = trigger_hooks("Stop", messages)
             # 如果hook返回非None，则将其作为强制用户输入，继续循环，防止ai偷懒
             # 在v4版本中唯一作用就是打印工具调用次数
@@ -815,7 +1231,22 @@ def agent_loop(messages: list):
                 continue
             print(f"\033[36m> {block.name}\033[0m")
 
+            # v8 模型认为上下文太长时主动压缩——模型自主控制
+            if block.name == "compact":
+                messages[:] = compact_history(messages)
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": "[Compacted. Conversation history has been summarized.]",
+                    }
+                )
+                messages.append({"role": "user", "content": results})
+                # 结束当前轮次，从压缩上下文中重新开始
+                break
+
             # v4 hook代替v3权限检验，PreToolUse出现问题就打印反馈给模型，继续下一次循环
+            # 与v5 todo同样，先压缩再检验
             blocked = trigger_hooks("PreToolUse", block)
             if blocked:
                 results.append(
@@ -827,20 +1258,6 @@ def agent_loop(messages: list):
                 )
                 continue
 
-            # v8 模型认为上下文太长时主动压缩——模型自主控制
-            if block.name == "compact":
-                messages[:] = compact_history(messages)
-                results.append({"type": "tool_result", "tool_use_id": block.id,
-                                "content": "[Compacted. Conversation history has been summarized.]"})
-                messages.append({"role": "user", "content": results})
-                # 结束当前轮次，从压缩上下文中重新开始
-                break
-
-            blocked = trigger_hooks("PreToolUse", block)
-            if blocked:
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(blocked)})
-                continue
-            
             handler = TOOL_HANDLERS.get(block.name)
             # "**"为解包字典，将字典的键值对作为关键字参数传递给函数
             output = handler(**block.input) if handler else f"Unknown: {block.name}"
@@ -871,13 +1288,13 @@ def agent_loop(messages: list):
 
 
 if __name__ == "__main__":
-    print("Version 8: Context Compact")
+    print("Version 9: Memory")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     history = []
     while True:
         try:
-            query = input("\033[36ms08 >> \033[0m")
+            query = input("\033[36ms09 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):
