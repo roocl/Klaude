@@ -1,6 +1,7 @@
-import ast, json, os, subprocess, time, re, random
+import ast, json, os, subprocess, time, re, random, yaml
+
 from pathlib import Path
-import yaml
+from dataclasses import dataclass, asdict
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -19,6 +20,8 @@ TRANSCRIPT_DIR = WORKDIR / ".transcripts"
 MEMORY_DIR = WORKDIR / ".memory"
 MEMORY_DIR.mkdir(exist_ok=True)
 MEMORY_INDEX = MEMORY_DIR / "MEMORY.md"
+TASKS_DIR = WORKDIR / ".tasks"
+TASKS_DIR.mkdir(exist_ok=True)
 
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 PRIMARY_MODEL = os.environ["MODEL_ID"]
@@ -37,6 +40,109 @@ CONTINUATION_PROMPT = (
     "Output token limit hit. Resume directly — "
     "no apology, no recap. Pick up mid-thought."
 )
+
+""" v12 任务系统 """
+
+
+# 装饰器，自动为类生成样板方法
+@dataclass
+class Task:
+    id: str
+    subject: str
+    description: str
+    status: str  # pending | in_progress | completed
+    owner: str | None  # Agent name (multi-agent scenarios)
+    blockedBy: list[str]  # Dependency task IDs
+
+
+def _task_path(task_id: str) -> Path:
+    return TASKS_DIR / f"{task_id}.json"
+
+
+def create_task(
+    subject: str, description: str = "", blockedBy: list[str] | None = None
+) -> Task:
+    task = Task(
+        id=f"task_{int(time.time())}_{random.randint(0, 9999):04d}",
+        subject=subject,
+        description=description,
+        status="pending",
+        owner=None,
+        blockedBy=blockedBy or [],
+    )
+    save_task(task)
+    return task
+
+# 保存任务到文件
+def save_task(task: Task):
+    _task_path(task.id).write_text(json.dumps(asdict(task), indent=2))
+
+# 从文件中加载任务
+def load_task(task_id: str) -> Task:
+    return Task(**json.loads(_task_path(task_id).read_text()))
+
+# 
+def list_tasks() -> list[Task]:
+    return [
+        # json -> dict -> 关键词参数
+        Task(**json.loads(p.read_text())) for p in sorted(TASKS_DIR.glob("task_*.json"))
+    ]
+
+# 以 JSON 形式返回完整的任务详细信息
+def get_task(task_id: str) -> str:
+    task = load_task(task_id)
+    # task实例 -> dict -> 格式化的json字符串
+    return json.dumps(asdict(task), indent=2)
+
+# 检查所有blockedBy dependencies是否已完成。缺少的dependencies将被视为锁定。
+def can_start(task_id: str) -> bool:
+    task = load_task(task_id)
+    for dep_id in task.blockedBy:
+        # 前置任务不存在
+        if not _task_path(dep_id).exists():
+            return False
+        # 前置任务存在但未完成
+        if load_task(dep_id).status != "completed":
+            return False
+    return True
+
+# 申领pending任务，更新任务领取者与状态
+def claim_task(task_id: str, owner: str = "agent") -> str:
+    task = load_task(task_id)
+    if task.status != "pending":
+        return f"Task {task_id} is {task.status}, cannot claim"
+    if not can_start(task_id):
+        deps = [
+            d
+            for d in task.blockedBy
+            if not _task_path(d).exists() or load_task(d).status != "completed"
+        ]
+        return f"Blocked by: {deps}"
+    task.owner = owner
+    task.status = "in_progress"
+    save_task(task)
+    print(f"  \033[36m[claim] {task.subject} → in_progress (owner: {owner})\033[0m")
+    return f"Claimed {task.id} ({task.subject})"
+
+# 更新in_progress任务状态为completed，解锁后续任务
+def complete_task(task_id: str) -> str:
+    task = load_task(task_id)
+    if task.status != "in_progress":
+        return f"Task {task_id} is {task.status}, cannot complete"
+    task.status = "completed"
+    save_task(task)
+    unblocked = [
+        t.subject
+        for t in list_tasks()
+        if t.status == "pending" and t.blockedBy and can_start(t.id)
+    ]
+    print(f"  \033[32m[complete] {task.subject} ✓\033[0m")
+    msg = f"Completed {task.id} ({task.subject})"
+    if unblocked:
+        msg += f"\nUnblocked: {', '.join(unblocked)}"
+        print(f"  \033[33m[unblocked] {', '.join(unblocked)}\033[0m")
+    return msg
+
 
 """ v10 Prompt Sections """
 
@@ -902,7 +1008,46 @@ def reactive_compact(messages):
     ]
 
 
-""" v2-v8 工具定义与分发映射 """
+""" v12 task工具 """
+
+def run_create_task(subject: str, description: str = "",
+                    blockedBy: list[str] | None = None) -> str:
+    task = create_task(subject, description, blockedBy)
+    deps = f" (blockedBy: {', '.join(blockedBy)})" if blockedBy else ""
+    print(f"  \033[34m[create] {task.subject}{deps}\033[0m")
+    return f"Created {task.id}: {task.subject}{deps}"
+
+
+def run_list_tasks() -> str:
+    tasks = list_tasks()
+    if not tasks:
+        return "No tasks. Use create_task to add some."
+    lines = []
+    for t in tasks:
+        icon = {"pending": "○", "in_progress": "●",
+                "completed": "✓"}.get(t.status, "?")
+        deps = f" (blockedBy: {', '.join(t.blockedBy)})" if t.blockedBy else ""
+        owner = f" [{t.owner}]" if t.owner else ""
+        lines.append(f"  {icon} {t.id}: {t.subject} "
+                     f"[{t.status}]{owner}{deps}")
+    return "\n".join(lines)
+
+
+def run_get_task(task_id: str) -> str:
+    try:
+        return get_task(task_id)
+    except FileNotFoundError:
+        return f"Error: Task {task_id} not found"
+
+
+def run_claim_task(task_id: str) -> str:
+    return claim_task(task_id, owner="agent")
+
+
+def run_complete_task(task_id: str) -> str:
+    return complete_task(task_id)
+
+""" v2-v12 工具定义与分发映射 """
 
 TOOLS = [
     {
@@ -1005,6 +1150,35 @@ TOOLS = [
         "description": "Summarize earlier conversation to free context space.",
         "input_schema": {"type": "object", "properties": {"focus": {"type": "string"}}},
     },
+    # v12 task工具
+    {"name": "create_task",
+     "description": "Create a new task with optional blockedBy dependencies.",
+     "input_schema": {"type": "object",
+                      "properties": {
+                          "subject": {"type": "string"},
+                          "description": {"type": "string"},
+                          "blockedBy": {"type": "array",
+                                        "items": {"type": "string"}}},
+                      "required": ["subject"]}},
+    {"name": "list_tasks",
+     "description": "List all tasks with status, owner, and dependencies.",
+     "input_schema": {"type": "object", "properties": {},
+                      "required": []}},
+    {"name": "get_task",
+     "description": "Get full details of a specific task by ID.",
+     "input_schema": {"type": "object",
+                      "properties": {"task_id": {"type": "string"}},
+                      "required": ["task_id"]}},
+    {"name": "claim_task",
+     "description": "Claim a pending task. Sets owner, changes status to in_progress.",
+     "input_schema": {"type": "object",
+                      "properties": {"task_id": {"type": "string"}},
+                      "required": ["task_id"]}},
+    {"name": "complete_task",
+     "description": "Complete an in-progress task. Reports unblocked downstream tasks.",
+     "input_schema": {"type": "object",
+                      "properties": {"task_id": {"type": "string"}},
+                      "required": ["task_id"]}},
 ]
 
 TOOL_HANDLERS = {
@@ -1016,6 +1190,9 @@ TOOL_HANDLERS = {
     "todo_write": run_todo_write,
     "task": spawn_subagent,
     "load_skill": load_skill,
+    "create_task": run_create_task, "list_tasks": run_list_tasks,
+    "get_task": run_get_task, "claim_task": run_claim_task,
+    "complete_task": run_complete_task,
 }
 
 """ v8 子agent工具定义与映射 """
@@ -1374,11 +1551,15 @@ def agent_loop(messages: list, context: dict):
             try:
                 # 首次循环仅有用户提问，之后循环包含助手回复与工具结果
                 response = with_retry(
-                lambda mt=max_tokens, mdl=state.current_model:
-                    client.messages.create(
-                        model=mdl, system=system, messages=messages,
-                        tools=TOOLS, max_tokens=mt),
-                state)
+                    lambda mt=max_tokens, mdl=state.current_model: client.messages.create(
+                        model=mdl,
+                        system=system,
+                        messages=messages,
+                        tools=TOOLS,
+                        max_tokens=mt,
+                    ),
+                    state,
+                )
             except Exception as e:
                 # 提示词太长 -> 单次调用reactive compact
                 if is_prompt_too_long_error(e):
@@ -1386,39 +1567,59 @@ def agent_loop(messages: list, context: dict):
                         messages[:] = reactive_compact(messages)
                         state.has_attempted_reactive_compact = True
                         continue
-                    print("  \033[31m[unrecoverable] still too long after compact\033[0m")
-                    messages.append({"role": "assistant", "content": [
-                        {"type": "text",
-                        "text": "[Error] Context too large, cannot continue."}]})
+                    print(
+                        "  \033[31m[unrecoverable] still too long after compact\033[0m"
+                    )
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "[Error] Context too large, cannot continue.",
+                                }
+                            ],
+                        }
+                    )
                     return
 
                 # 无法恢复
                 name = type(e).__name__
                 print(f"  \033[31m[unrecoverable] {name}: {str(e)[:100]}\033[0m")
-                messages.append({"role": "assistant", "content": [
-                    {"type": "text", "text": f"[Error] {name}: {str(e)[:200]}"}]})
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": f"[Error] {name}: {str(e)[:200]}"}
+                        ],
+                    }
+                )
                 return
-                
+
             # 到达max_tokens -> escalate或continue
             if response.stop_reason == "max_tokens":
                 # 首次升级：不要附加截断的输出到messages，升级max_tokens并重试相同的请求
                 if not state.has_escalated:
                     max_tokens = ESCALATED_MAX_TOKENS
                     state.has_escalated = True
-                    print(f"  \033[33m[max_tokens] escalating"
-                        f" {DEFAULT_MAX_TOKENS} -> {ESCALATED_MAX_TOKENS}\033[0m")
+                    print(
+                        f"  \033[33m[max_tokens] escalating"
+                        f" {DEFAULT_MAX_TOKENS} -> {ESCALATED_MAX_TOKENS}\033[0m"
+                    )
                     continue
                 # 64K仍被截断：保存截断输出+continuation prompt
                 messages.append({"role": "assistant", "content": response.content})
                 if state.recovery_count < MAX_RECOVERY_RETRIES:
                     messages.append({"role": "user", "content": CONTINUATION_PROMPT})
                     state.recovery_count += 1
-                    print(f"  \033[33m[max_tokens] continuation"
-                        f" {state.recovery_count}/{MAX_RECOVERY_RETRIES}\033[0m")
+                    print(
+                        f"  \033[33m[max_tokens] continuation"
+                        f" {state.recovery_count}/{MAX_RECOVERY_RETRIES}\033[0m"
+                    )
                     continue
                 print("  \033[31m[max_tokens] recovery limit reached\033[0m")
                 return
-        
+
             reactive_retries = 0
         # 当api返回 context 超长错误且还没达到最大重试次数时，进行reactive compact
         except Exception as e:
@@ -1537,7 +1738,7 @@ def agent_loop(messages: list, context: dict):
 
 
 if __name__ == "__main__":
-    print("Version 11: Error Recovery")
+    print("Version 12: Task")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     history = []
@@ -1545,7 +1746,7 @@ if __name__ == "__main__":
     context = update_context({}, [])
     while True:
         try:
-            query = input("\033[36ms11 >> \033[0m")
+            query = input("\033[36ms12 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):
@@ -1556,7 +1757,7 @@ if __name__ == "__main__":
         agent_loop(history, context)
         # 得到最终回复后刷新context，确保下次提问时包含最新的memory（如果更新了memory的话）
         context = update_context(context, history)
-        
+
         for msg in history[turn_start:]:
             if msg.get("role") != "assistant":
                 continue
