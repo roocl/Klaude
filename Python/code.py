@@ -1,5 +1,6 @@
 import ast, json, os, subprocess
 from pathlib import Path
+import yaml
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -12,17 +13,77 @@ if os.getenv("ANTHROPIC_BASE_URL"):
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
 WORKDIR = Path.cwd()
+SKILLS_DIR = WORKDIR / "skills"
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 CURRENT_TODOS: list[dict] = []
 
-# v5 更新系统提示词
-SYSTEM = (
-    f"You are a coding agent at {WORKDIR}. "
-    "Before starting any multi-step task, use todo_write to plan your steps. "
-    "Update status as you go."
-    "For complex sub-problems, use the task tool to spawn a subagent."
-)
+
+# v7 扫描skill目录，解析每个SKILL.md的YAML frontmatter，生成技能列表
+def _parse_frontmatter(text: str) -> tuple[dict, str]:
+    # 如果文本不以 "---" 开头，说明没有 frontmatter，返回空字典和原始文本
+    if not text.startswith("---"):
+        return {}, text
+    # split 分割文本为三部分，最多分割两次，得到前导 "---"、YAML内容、剩余文本
+    parts = text.split("---", 2)
+    # 如果分割后的部分少于3，说明没有完整的 frontmatter，返回空字典和原始文本
+    if len(parts) < 3:
+        return {}, text
+    try:
+        # 使用 yaml.safe_load 解析 YAML 内容
+        meta = yaml.safe_load(parts[1]) or {}
+    except yaml.YAMLError:
+        meta = {}
+    # 返回描述和详细内容
+    return meta, parts[2].strip()
+
+
+# v6 启动时构建技能注册表
+SKILL_REGISTRY: dict[str, dict] = {}
+
+
+# 扫描skills，填入SKILL_REGISTRY
+def _scan_skills():
+    if not SKILLS_DIR.exists():
+        return
+    # 按字母顺序遍历skills目录下的每个子目录
+    for d in sorted(SKILLS_DIR.iterdir()):
+        if not d.is_dir():
+            continue
+        manifest = d / "SKILL.md"
+        if manifest.exists():
+            raw = manifest.read_text()
+            meta, body = _parse_frontmatter(raw)
+            name = meta.get("name", d.name)
+            desc = meta.get("description", raw.split("\n")[0].lstrip("#").strip())
+            SKILL_REGISTRY[name] = {"name": name, "description": desc, "content": raw}
+
+
+# 模块加载时立刻执行扫描
+# 因为SYSTEM是模块级全局变量，它的构建依赖于SKILL_REGISTRY，所以_scan_skills() 也必须在模块级先执行
+_scan_skills()
+
+
+# v7 列出所有技能的名称和一行描述
+def list_skills() -> str:
+    if not SKILL_REGISTRY:
+        return "(no skills found)"
+    return "\n".join(
+        f"- **{s['name']}**: {s['description']}" for s in SKILL_REGISTRY.values()
+    )
+
+
+# v7 启动时构建SYSTEM提示词，并注入技能目录
+def build_system() -> str:
+    catalog = list_skills()
+    return (
+        f"You are a coding agent at {WORKDIR}. "
+        f"Skills available:\n{catalog}\n"
+        "Use load_skill to get full details when needed."
+    )
+
+
+SYSTEM = build_system()
 
 # v6 子系统提示词
 SUB_SYSTEM = (
@@ -32,7 +93,7 @@ SUB_SYSTEM = (
 )
 
 """ 
-v2-v5 工具实现
+v2-v6 工具实现
 """
 
 
@@ -115,11 +176,6 @@ def run_glob(pattern: str) -> str:
         return f"Error: {e}"
 
 
-""" 
-v5 todo_write工具
-"""
-
-
 # 将输入的todos规范化为列表形式，并进行基本验证
 def _normalize_todos(todos):
     if isinstance(todos, str):
@@ -164,8 +220,6 @@ def run_todo_write(todos: list) -> str:
     return f"Updated {len(CURRENT_TODOS)} tasks"
 
 
-""" v6 生成子agent """
-
 # 从消息内容块中提取文本，忽略非文本块
 def extract_text(content) -> str:
     if not isinstance(content, list):
@@ -173,7 +227,8 @@ def extract_text(content) -> str:
     return "\n".join(
         getattr(b, "text", "") for b in content if getattr(b, "type", None) == "text"
     )
-    
+
+
 def spawn_subagent(description: str) -> str:
     print(f"\n\033[35m[Subagent spawned]\033[0m")
     # 子agent的消息上下文仅包含用户的描述
@@ -230,6 +285,15 @@ def spawn_subagent(description: str) -> str:
     # 仅返回最终结论，丢弃整个消息历史
     return result
 
+
+# v7 加载技能内容，避免路径遍历
+def load_skill(name: str) -> str:
+    skill = SKILL_REGISTRY.get(name)
+    if not skill:
+        return f"Skill not found: {name}"
+    return skill["content"]
+
+
 """ 
 v2-v6 工具定义与分发映射
 """
@@ -284,7 +348,7 @@ TOOLS = [
             "required": ["pattern"],
         },
     },
-    # v5 新工具
+    # v5 todo工具
     {
         "name": "todo_write",
         "description": "Create and manage a task list for your current coding session.",
@@ -309,7 +373,7 @@ TOOLS = [
             "required": ["todos"],
         },
     },
-    # v6 新工具
+    # v6 task工具
     {
         "name": "task",
         "description": "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
@@ -317,6 +381,16 @@ TOOLS = [
             "type": "object",
             "properties": {"description": {"type": "string"}},
             "required": ["description"],
+        },
+    },
+    # v7 skill工具
+    {
+        "name": "load_skill",
+        "description": "Load the full content of a skill by name.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
         },
     },
 ]
@@ -328,7 +402,8 @@ TOOL_HANDLERS = {
     "edit_file": run_edit,
     "glob": run_glob,
     "todo_write": run_todo_write,
-    "task": spawn_subagent
+    "task": spawn_subagent,
+    "load_skill": load_skill,
 }
 
 """ v6 子agent工具定义与映射 """
@@ -392,8 +467,6 @@ SUB_HANDLERS = {
     "edit_file": run_edit,
     "glob": run_glob,
 }
-
-
 
 
 """ v4 hook """
@@ -598,13 +671,13 @@ def agent_loop(messages: list):
 
 
 if __name__ == "__main__":
-    print("Version 6: SubAgent")
+    print("Version 7: Skills")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     history = []
     while True:
         try:
-            query = input("\033[36ms06 >> \033[0m")
+            query = input("\033[36ms07 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):
