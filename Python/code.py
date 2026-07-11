@@ -24,6 +24,90 @@ client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 CURRENT_TODOS: list[dict] = []
 
+""" v10 Prompt Sections """
+
+PROMPT_SECTIONS = {
+    "identity": "You are a coding agent. Act, don't explain.",
+    "tools": "Available tools: bash, read_file, write_file.",
+    "workspace": f"Working directory: {WORKDIR}",
+    "skills": "Skills available:\n{catalog}\nUse load_skill to get full details when needed.",
+    "memory": "Relevant memories are injected below when available:\n{memories}",
+    "instructions": "Respect user preferences from memory. When the user says 'remember' or expresses a clear preference, extract it as a memory.",
+}
+
+
+# 基于当前上下文选择与合并prompt sections
+def assemble_system_prompt(context: dict) -> str:
+    sections = []
+
+    # 总是加载
+    sections.append(PROMPT_SECTIONS["identity"])
+    sections.append(PROMPT_SECTIONS["tools"])
+    sections.append(PROMPT_SECTIONS["workspace"])
+
+    # Skills catalog 替代旧的 list_skills()
+    skills = context.get("skills_catalog", "")
+    if skills and skills != "(no skills found)":
+        sections.append(PROMPT_SECTIONS["skills"].format(catalog=skills))
+
+    # 当MEMORY.md存在且有内容时才加载记忆 + 行为指令
+    memories = context.get("memories", "")
+    if memories:
+        sections.append(PROMPT_SECTIONS["memory"].format(memories=memories))
+        sections.append(PROMPT_SECTIONS["instructions"])
+
+    return "\n\n".join(sections)
+
+
+_last_context_key = None
+_last_prompt = None
+
+
+def get_system_prompt(context: dict) -> str:
+    """缓存包装器——仅在上下文更改时重新组装。
+
+    使用 json.dumps 进行确定性序列化，而不是 Python 的 hash()
+    它具有过程随机化并且在嵌套字典/列表上失败。
+    此缓存仅避免进程内冗余的字符串组装。
+    Real Claude Code 还通过以下方式保护 API 级提示缓存：
+    稳定的节排序和 SYSTEM_PROMPT_DYNAMIC_BOUNDARY。
+    """
+    global _last_context_key, _last_prompt
+    key = json.dumps(context, sort_keys=True, ensure_ascii=False, default=str)
+    if key == _last_context_key and _last_prompt:
+        print("  \033[90m[cache hit] system prompt unchanged\033[0m")
+        return _last_prompt
+    # 更新缓存
+    _last_context_key = key
+    # 重新组装提示词
+    _last_prompt = assemble_system_prompt(context)
+    # 打印调试日志，显示加载的prompt sections
+    loaded = ["identity", "tools", "workspace"]
+    skills = context.get("skills_catalog", "")
+    if skills and skills != "(no skills found)":
+        loaded.append("skills")
+    if context.get("memories"):
+        loaded.append("memory")
+        loaded.append("instructions")
+    print(f"  \033[32m[assembled] sections: {', '.join(loaded)}\033[0m")
+    return _last_prompt
+
+
+# 从真实状态导出上下文：存在哪些工具，记忆文档是否存在
+def update_context(context: dict, messages: list) -> dict:
+    memories = ""
+    if MEMORY_INDEX.exists():
+        content = MEMORY_INDEX.read_text().strip()
+        if content:
+            memories = content
+    return {
+        "enabled_tools": list(TOOL_HANDLERS.keys()),
+        "workspace": str(WORKDIR),
+        "memories": memories,
+        "skills_catalog": list_skills(),
+    }
+
+
 """ v9 记忆系统 """
 
 MEMORY_TYPES = ["user", "feedback", "project", "reference"]
@@ -274,8 +358,10 @@ def extract_memories(messages: list):
     except Exception:
         pass
 
+
 # 合并阈值
 CONSOLIDATE_THRESHOLD = 10
+
 
 # 合并重复/过期的记忆，当文件数量≥阈值时触发
 def consolidate_memories():
@@ -379,23 +465,6 @@ def list_skills() -> str:
         return "(no skills found)"
     return "\n".join(
         f"- **{s['name']}**: {s['description']}" for s in SKILL_REGISTRY.values()
-    )
-
-
-# v7 启动时构建SYSTEM提示词，并注入技能目录
-# v9 注入记忆索引
-def build_system() -> str:
-    catalog = list_skills()
-
-    index = read_memory_index()
-    memories_section = f"\n\nMemories available:\n{index}" if index else ""
-    return (
-        f"You are a coding agent at {WORKDIR}. "
-        f"Skills available:\n{catalog}\n"
-        "Use load_skill to get full details when needed.\n"
-        f"{memories_section}\n"
-        "Relevant memories are injected below. Respect user preferences from memory.\n"
-        "When the user says 'remember' or expresses a clear preference, extract it as a memory."
     )
 
 
@@ -1097,6 +1166,7 @@ v4 插入hook触发
 v5 提醒计数器
 v8 历史压缩管道
 v9 注入与提取记忆
+v10 组装与更新提示词
 """
 
 rounds_since_todo = 0
@@ -1104,7 +1174,7 @@ rounds_since_todo = 0
 MAX_REACTIVE_RETRIES = 1
 
 
-def agent_loop(messages: list):
+def agent_loop(messages: list, context: dict):
     global rounds_since_todo
     reactive_retries = 0
 
@@ -1115,8 +1185,8 @@ def agent_loop(messages: list):
         if messages and isinstance(messages[-1].get("content"), str)
         else None
     )
-    # v9 每个用户轮次构建一次系统提示词；循环结束后更新记忆
-    system = build_system()
+    # 首次 system prompt 将从 context 中组装（skills + memories + instructions）
+    system = get_system_prompt(context)
 
     while True:
         # v9 保存压缩前的快照以便提取精确的记忆
@@ -1149,6 +1219,7 @@ def agent_loop(messages: list):
             )
             rounds_since_todo = 0
 
+        # 注入记忆
         try:
             request_messages = messages
             if (
@@ -1282,26 +1353,34 @@ def agent_loop(messages: list):
             # 压缩未被调用
             # 将工具结果反馈回消息列表，循环继续
             messages.append({"role": "user", "content": results})
+            
+            # 每轮工具后重新评估上下文和提示
+            context = update_context(context, messages)
+            system = get_system_prompt(context)
             continue
         # 压缩被调用，results已附加到上方，继续下一轮while，不能再继续处理其他 block
         continue
 
 
 if __name__ == "__main__":
-    print("Version 9: Memory")
+    print("Version 10: System Prompt")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     history = []
+    # 初始化context对象
+    context = update_context({}, [])
     while True:
         try:
-            query = input("\033[36ms09 >> \033[0m")
+            query = input("\033[36ms10 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):
             break
         trigger_hooks("UserPromptSubmit", query)
         history.append({"role": "user", "content": query})
-        agent_loop(history)
+        agent_loop(history, context)
+        # 得到最终回复后刷新context，确保下次提问时包含最新的memory（如果更新了memory的话）
+        context = update_context(context, history)
         # 遍历最终文本回复的内容块，打印文本部分（防御性检查）
         for block in history[-1]["content"]:
             if getattr(block, "type", None) == "text":
