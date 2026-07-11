@@ -1,4 +1,4 @@
-import ast, json, os, subprocess, time, re
+import ast, json, os, subprocess, time, re, random
 from pathlib import Path
 import yaml
 
@@ -21,8 +21,22 @@ MEMORY_DIR.mkdir(exist_ok=True)
 MEMORY_INDEX = MEMORY_DIR / "MEMORY.md"
 
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
+PRIMARY_MODEL = os.environ["MODEL_ID"]
+FALLBACK_MODEL = os.getenv("FALLBACK_MODEL_ID")
 CURRENT_TODOS: list[dict] = []
+
+# 常量
+
+ESCALATED_MAX_TOKENS = 64000
+DEFAULT_MAX_TOKENS = 8000
+MAX_RECOVERY_RETRIES = 3
+MAX_RETRIES = 10
+BASE_DELAY_MS = 500
+MAX_CONSECUTIVE_529 = 3
+CONTINUATION_PROMPT = (
+    "Output token limit hit. Resume directly — "
+    "no apology, no recap. Pick up mid-thought."
+)
 
 """ v10 Prompt Sections """
 
@@ -241,7 +255,7 @@ def select_relevant_memories(messages: list, max_items: int = 5) -> list[str]:
 
     try:
         response = client.messages.create(
-            model=MODEL,
+            model=PRIMARY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=200,
         )
@@ -333,7 +347,9 @@ def extract_memories(messages: list):
 
     try:
         response = client.messages.create(
-            model=MODEL, messages=[{"role": "user", "content": prompt}], max_tokens=800
+            model=PRIMARY_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=800,
         )
         text = extract_text(response.content).strip()
         # 从response中提取json数组
@@ -386,7 +402,9 @@ def consolidate_memories():
 
     try:
         response = client.messages.create(
-            model=MODEL, messages=[{"role": "user", "content": prompt}], max_tokens=3000
+            model=PRIMARY_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=3000,
         )
         text = extract_text(response.content).strip()
         match = re.search(r"\[.*\]", text, re.DOTALL)
@@ -618,7 +636,7 @@ def spawn_subagent(description: str) -> str:
     # 最多30轮循环，防止无限循环
     for _ in range(30):
         response = client.messages.create(
-            model=MODEL,
+            model=PRIMARY_MODEL,
             system=SUB_SYSTEM,
             messages=messages,
             tools=SUB_TOOLS,
@@ -840,7 +858,9 @@ def summarize_history(messages):
         + conversation
     )
     response = client.messages.create(
-        model=MODEL, messages=[{"role": "user", "content": prompt}], max_tokens=2000
+        model=PRIMARY_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=2000,
     )
     return (
         "\n".join(
@@ -1061,6 +1081,116 @@ SUB_HANDLERS = {
 }
 
 
+""" v11 错误恢复 """
+
+
+# 跟踪整个循环的恢复尝试
+class RecoveryState:
+    def __init__(self):
+        self.has_escalated = False
+        self.recovery_count = 0
+        self.consecutive_529 = 0
+        self.has_attempted_reactive_compact = False
+        self.current_model = PRIMARY_MODEL
+
+
+# 带抖动的指数退避。retry_after（由服务端计算并决定）优先
+def retry_delay(attempt, retry_after=None):
+    if retry_after:
+        return retry_after
+    # 指数退避，延迟不断翻倍，上限为32秒
+    base = min(BASE_DELAY_MS * (2**attempt), 32000) / 1000
+    # 随机抖动
+    jitter = random.uniform(0, base * 0.25)
+    return base + jitter
+
+
+# 临时故障的指数退避 (429/529)。非临时故障会重新抛出给外部处理程序。
+def with_retry(fn, state: RecoveryState):
+    for attempt in range(MAX_RETRIES):
+        try:
+            # fn为可调用对象（函数/lambda），fn()执行传入的函数
+            result = fn()
+            state.consecutive_529 = 0
+            return result
+        except Exception as e:
+            # 获取异常类的名称和异常的描述信息
+            name = type(e).__name__
+            msg = str(e).lower()
+
+            # 429 速率限制 -> 指数退避
+            if "ratelimit" in name.lower() or "429" in msg:
+                delay = retry_delay(attempt)
+                print(
+                    f"  \033[33m[429 rate limit] retry {attempt+1}/{MAX_RETRIES},"
+                    f" wait {delay:.1f}s\033[0m"
+                )
+                time.sleep(delay)
+                continue
+
+            # 529重载 -> 指数退避 + 回退模型
+            if "overloaded" in name.lower() or "529" in msg or "overloaded" in msg:
+                state.consecutive_529 += 1
+                if state.consecutive_529 >= MAX_CONSECUTIVE_529:
+                    if FALLBACK_MODEL:
+                        # 切换备用模型
+                        state.current_model = FALLBACK_MODEL
+                        state.consecutive_529 = 0
+                        print(
+                            f"  \033[31m[529 x{MAX_CONSECUTIVE_529}]"
+                            f" switching to {FALLBACK_MODEL}\033[0m"
+                        )
+                    else:
+                        state.consecutive_529 = 0
+                        print(
+                            f"  \033[31m[529 x{MAX_CONSECUTIVE_529}]"
+                            f" no FALLBACK_MODEL_ID configured, continuing retry\033[0m"
+                        )
+                delay = retry_delay(attempt)
+                print(
+                    f"  \033[33m[529 overloaded] retry {attempt+1}/{MAX_RETRIES},"
+                    f" wait {delay:.1f}s\033[0m"
+                )
+                time.sleep(delay)
+                continue
+
+            # 非临时故障 -> 重新丢给外部的try/except
+            raise
+    raise RuntimeError(f"Max retries ({MAX_RETRIES}) exceeded")
+
+
+# 检查 API 错误是否指示提示词/上下文太长
+def is_prompt_too_long_error(e: Exception) -> bool:
+    msg = str(e).lower()
+    return (
+        ("prompt" in msg and "long" in msg)
+        or "prompt_is_too_long" in msg
+        or "context_length_exceeded" in msg
+        or "max_context_window" in msg
+    )
+
+
+def reactive_compact(messages: list) -> list:
+    """紧急压缩——教学版本保留最后 N 条消息。
+
+    实际 CC 通过 LLM 生成压缩摘要，然后使用
+
+    压缩后的消息列表重试。教学版本简化为尾部保留，
+
+    因为 v8/v9 已经涵盖了基于 LLM 的压缩。"""
+    print("  \033[31m[reactive compact] trimming to last 5 messages\033[0m")
+    tail = messages[-5:]
+    return [
+        {
+            "role": "user",
+            "content": "[Reactive compact] Earlier conversation trimmed. "
+            "Continue from where you left off.",
+        },
+        # "*"是可迭代对象解包运算符，将可迭代对象的每个元素"展开"到外层容器中
+        *tail,
+    ]
+
+
 """ v4 hook """
 
 HOOKS = {"UserPromptSubmit": [], "PreToolUse": [], "PostToolUse": [], "Stop": []}
@@ -1185,8 +1315,11 @@ def agent_loop(messages: list, context: dict):
         if messages and isinstance(messages[-1].get("content"), str)
         else None
     )
-    # 首次 system prompt 将从 context 中组装（skills + memories + instructions）
+    # v10 首次 system prompt 将从 context 中组装（skills + memories + instructions）
     system = get_system_prompt(context)
+    # v11 定义错误恢复变量
+    state = RecoveryState()
+    max_tokens = DEFAULT_MAX_TOKENS
 
     while True:
         # v9 保存压缩前的快照以便提取精确的记忆
@@ -1237,14 +1370,55 @@ def agent_loop(messages: list, context: dict):
                     + messages[memory_turn]["content"],
                 }
 
-            # 首次循环仅有用户提问，之后循环包含助手回复与工具结果
-            response = client.messages.create(
-                model=MODEL,
-                system=system,
-                messages=request_messages,
-                tools=TOOLS,
-                max_tokens=8000,
-            )
+            # v11 调用llm：with_retry处理429/529，外层处理rest
+            try:
+                # 首次循环仅有用户提问，之后循环包含助手回复与工具结果
+                response = with_retry(
+                lambda mt=max_tokens, mdl=state.current_model:
+                    client.messages.create(
+                        model=mdl, system=system, messages=messages,
+                        tools=TOOLS, max_tokens=mt),
+                state)
+            except Exception as e:
+                # 提示词太长 -> 单次调用reactive compact
+                if is_prompt_too_long_error(e):
+                    if not state.has_attempted_reactive_compact:
+                        messages[:] = reactive_compact(messages)
+                        state.has_attempted_reactive_compact = True
+                        continue
+                    print("  \033[31m[unrecoverable] still too long after compact\033[0m")
+                    messages.append({"role": "assistant", "content": [
+                        {"type": "text",
+                        "text": "[Error] Context too large, cannot continue."}]})
+                    return
+
+                # 无法恢复
+                name = type(e).__name__
+                print(f"  \033[31m[unrecoverable] {name}: {str(e)[:100]}\033[0m")
+                messages.append({"role": "assistant", "content": [
+                    {"type": "text", "text": f"[Error] {name}: {str(e)[:200]}"}]})
+                return
+                
+            # 到达max_tokens -> escalate或continue
+            if response.stop_reason == "max_tokens":
+                # 首次升级：不要附加截断的输出到messages，升级max_tokens并重试相同的请求
+                if not state.has_escalated:
+                    max_tokens = ESCALATED_MAX_TOKENS
+                    state.has_escalated = True
+                    print(f"  \033[33m[max_tokens] escalating"
+                        f" {DEFAULT_MAX_TOKENS} -> {ESCALATED_MAX_TOKENS}\033[0m")
+                    continue
+                # 64K仍被截断：保存截断输出+continuation prompt
+                messages.append({"role": "assistant", "content": response.content})
+                if state.recovery_count < MAX_RECOVERY_RETRIES:
+                    messages.append({"role": "user", "content": CONTINUATION_PROMPT})
+                    state.recovery_count += 1
+                    print(f"  \033[33m[max_tokens] continuation"
+                        f" {state.recovery_count}/{MAX_RECOVERY_RETRIES}\033[0m")
+                    continue
+                print("  \033[31m[max_tokens] recovery limit reached\033[0m")
+                return
+        
             reactive_retries = 0
         # 当api返回 context 超长错误且还没达到最大重试次数时，进行reactive compact
         except Exception as e:
@@ -1353,7 +1527,7 @@ def agent_loop(messages: list, context: dict):
             # 压缩未被调用
             # 将工具结果反馈回消息列表，循环继续
             messages.append({"role": "user", "content": results})
-            
+
             # 每轮工具后重新评估上下文和提示
             context = update_context(context, messages)
             system = get_system_prompt(context)
@@ -1363,7 +1537,7 @@ def agent_loop(messages: list, context: dict):
 
 
 if __name__ == "__main__":
-    print("Version 10: System Prompt")
+    print("Version 11: Error Recovery")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     history = []
@@ -1371,18 +1545,23 @@ if __name__ == "__main__":
     context = update_context({}, [])
     while True:
         try:
-            query = input("\033[36ms10 >> \033[0m")
+            query = input("\033[36ms11 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):
             break
         trigger_hooks("UserPromptSubmit", query)
+        turn_start = len(history)
         history.append({"role": "user", "content": query})
         agent_loop(history, context)
         # 得到最终回复后刷新context，确保下次提问时包含最新的memory（如果更新了memory的话）
         context = update_context(context, history)
-        # 遍历最终文本回复的内容块，打印文本部分（防御性检查）
-        for block in history[-1]["content"]:
-            if getattr(block, "type", None) == "text":
-                print(block.text)
+        
+        for msg in history[turn_start:]:
+            if msg.get("role") != "assistant":
+                continue
+            # 遍历最终文本回复的内容块，打印文本部分（防御性检查）
+            for block in msg["content"]:
+                if getattr(block, "type", None) == "text":
+                    print(block.text)
         print()
