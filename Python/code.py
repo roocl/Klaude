@@ -2551,6 +2551,8 @@ MEMORY_INDEX = MEMORY_DIR / "MEMORY.md"
 
 
 MEMORY_TYPES = ["user", "feedback", "project", "reference"]
+MEMORY_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+MEMORY_SELECTION_CACHE: dict[str, list[str]] = {}
 
 
 def _memory_parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -2571,15 +2573,55 @@ def _memory_parse_frontmatter(text: str) -> tuple[dict, str]:
 
 # 将记忆写入文档
 def write_memory_file(name: str, mem_type: str, description: str, body: str):
-    slug = name.lower().replace(" ", "-").replace("/", "-")
+    slug = name.lower().strip().replace(" ", "-")
+    if not MEMORY_NAME.fullmatch(slug):
+        raise ValueError("Memory name must use letters, digits, and single hyphens")
+    if mem_type not in MEMORY_TYPES:
+        raise ValueError(f"Unknown memory type: {mem_type}")
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     filename = f"{slug}.md"
     filepath = MEMORY_DIR / filename
     filepath.write_text(
         f"---\nname: {name}\ndescription: {description}\ntype: {mem_type}\n---\n\n{body}\n"
     )
+    MEMORY_SELECTION_CACHE.clear()
     # 重建索引
     _rebuild_index()
     return filepath
+
+
+def _validated_memory_records(items) -> list[dict]:
+    if not isinstance(items, list):
+        raise ValueError("Memory response must be a JSON array")
+    records = []
+    for index, mem in enumerate(items):
+        if not isinstance(mem, dict):
+            raise ValueError(f"Memory item {index} must be an object")
+        name = mem.get("name") or f"memory-{time.time_ns()}-{index}"
+        mem_type = mem.get("type", "user")
+        description = mem.get("description", "").strip()
+        body = mem.get("body", "").strip()
+        slug = name.lower().strip().replace(" ", "-")
+        if not MEMORY_NAME.fullmatch(slug):
+            raise ValueError(f"Invalid memory name: {name}")
+        if mem_type not in MEMORY_TYPES:
+            raise ValueError(f"Unknown memory type: {mem_type}")
+        if not description or not body:
+            raise ValueError(f"Memory item {index} requires description and body")
+        records.append(
+            {
+                "name": name,
+                "slug": slug,
+                "type": mem_type,
+                "description": description,
+                "body": body,
+            }
+        )
+    return records
+
+
+def _report_memory_error(stage: str, error: Exception):
+    terminal_print(f"\033[33m[Memory: {stage} failed: {type(error).__name__}: {error}]\033[0m")
 
 
 # 从所有记忆文档中重建MEMORY.md索引
@@ -2669,6 +2711,12 @@ def select_relevant_memories(messages: list, max_items: int = 5) -> list[str]:
     for i, f in enumerate(files):
         catalog_lines.append(f"{i}: {f['name']} — {f['description']}")
     catalog = "\n".join(catalog_lines)
+    cache_key = json.dumps(
+        {"recent": recent, "catalog": catalog, "max_items": max_items},
+        sort_keys=True,
+    )
+    if cache_key in MEMORY_SELECTION_CACHE:
+        return list(MEMORY_SELECTION_CACHE[cache_key])
 
     prompt = (
         "Given the recent conversation and the memory catalog below, "
@@ -2698,9 +2746,11 @@ def select_relevant_memories(messages: list, max_items: int = 5) -> list[str]:
                     selected.append(files[idx]["filename"])
                     if len(selected) >= max_items:
                         break
+            MEMORY_SELECTION_CACHE.clear()
+            MEMORY_SELECTION_CACHE[cache_key] = list(selected)
             return selected
-    except Exception:
-        pass
+    except Exception as e:
+        _report_memory_error("selection", e)
 
     # 切分最近用户文本以获取词集
     keywords = [w.lower() for w in recent.split() if len(w) > 3]
@@ -2712,6 +2762,8 @@ def select_relevant_memories(messages: list, max_items: int = 5) -> list[str]:
             selected.append(f["filename"])
             if len(selected) >= max_items:
                 break
+    MEMORY_SELECTION_CACHE.clear()
+    MEMORY_SELECTION_CACHE[cache_key] = list(selected)
     return selected
 
 
@@ -2786,19 +2838,19 @@ def extract_memories(messages: list):
         items = json.loads(match.group())
         if not items:
             return
-        count = 0
-        for mem in items:
-            name = mem.get("name", f"memory_{int(time.time())}")
-            mem_type = mem.get("type", "user")
-            desc = mem.get("description", "")
-            body = mem.get("body", "")
-            if desc and body:
-                write_memory_file(name, mem_type, desc, body)
-                count += 1
+        records = _validated_memory_records(items)
+        for record in records:
+            write_memory_file(
+                record["name"],
+                record["type"],
+                record["description"],
+                record["body"],
+            )
+        count = len(records)
         if count:
             print(f"\n\033[33m[Memory: extracted {count} new memories]\033[0m")
-    except Exception:
-        pass
+    except Exception as e:
+        _report_memory_error("extraction", e)
 
 
 # 合并阈值
@@ -2836,37 +2888,47 @@ def consolidate_memories():
         match = re.search(r"\[.*\]", text, re.DOTALL)
         if not match:
             return
-        items = json.loads(match.group())
+        records = _validated_memory_records(json.loads(match.group()))
+        staging_dir = MEMORY_DIR / f".staging-{time.time_ns()}"
+        staging_dir.mkdir(parents=True)
+        try:
+            for record in records:
+                (staging_dir / f"{record['slug']}.md").write_text(
+                    "---\n"
+                    f"name: {record['name']}\n"
+                    f"description: {record['description']}\n"
+                    f"type: {record['type']}\n"
+                    "---\n\n"
+                    f"{record['body']}\n"
+                )
 
-        # 删除旧记忆文档
-        for f in MEMORY_DIR.glob("*.md"):
-            if f.name != "MEMORY.md":
-                f.unlink()
-
-        for mem in items:
-            name = mem.get("name", f"memory_{int(time.time())}")
-            mem_type = mem.get("type", "user")
-            desc = mem.get("description", "")
-            body = mem.get("body", "")
-            if desc and body:
-                write_memory_file(name, mem_type, desc, body)
+            new_names = {f"{record['slug']}.md" for record in records}
+            for staged_file in staging_dir.glob("*.md"):
+                staged_file.replace(MEMORY_DIR / staged_file.name)
+            for old_file in MEMORY_DIR.glob("*.md"):
+                if old_file.name != "MEMORY.md" and old_file.name not in new_names:
+                    old_file.unlink()
+            _rebuild_index()
+            MEMORY_SELECTION_CACHE.clear()
+        finally:
+            for staged_file in staging_dir.glob("*"):
+                staged_file.unlink()
+            staging_dir.rmdir()
 
         print(
-            f"\n\033[33m[Memory: consolidated {len(files)} → {len(items)} memories]\033[0m"
+            f"\n\033[33m[Memory: consolidated {len(files)} → {len(records)} memories]\033[0m"
         )
-    except Exception:
-        pass
+    except Exception as e:
+        _report_memory_error("consolidation", e)
 
 
 # 从真实状态导出上下文
-def update_context() -> dict:
-    memories = ""
-    if MEMORY_INDEX.exists():
-        content = MEMORY_INDEX.read_text().strip()
-        if content:
-            memories = content
+def update_context(messages: list | None = None) -> dict:
+    memories = load_memories(messages) if messages else ""
+    if not memories and MEMORY_INDEX.exists():
+        memories = MEMORY_INDEX.read_text().strip()
     return {
-        "enabled_tools": list(TOOL_HANDLERS.keys()),
+        "enabled_tools": list(BUILTIN_HANDLERS.keys()),
         "workspace": str(WORKDIR),
         "memories": memories,
         "skills_catalog": list_skills(),
@@ -2942,7 +3004,7 @@ def agent_loop(messages: list, context: dict):
             rounds_since_todo = 0
 
         prepare_context(messages)
-        context = update_context()
+        context = update_context(messages)
         tools, handlers = assemble_tool_pool()
 
         try:
@@ -2976,6 +3038,8 @@ def agent_loop(messages: list, context: dict):
         messages.append({"role": "assistant", "content": response.content})
         if not has_tool_use(response.content):
             trigger_hooks("Stop", messages)
+            extract_memories(messages)
+            consolidate_memories()
             return
 
         results = []
@@ -3051,7 +3115,7 @@ def cron_autorun_loop(history: list, context: dict):
                 terminal_print(
                     f"  \033[35m[cron auto] {job.prompt[:60]}\033[0m")
             agent_loop(history, context)
-            context.update(update_context(context, history))
+            context.update(update_context(history))
             print_turn_assistants(history, turn_start)
 
 
@@ -3062,6 +3126,8 @@ if __name__ == "__main__":
 
     history = []
     context = update_context()
+    threading.Thread(target=cron_autorun_loop,
+                     args=(history, context), daemon=True).start()
     while True:
         try:
             query = input(PROMPT)
