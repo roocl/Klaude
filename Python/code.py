@@ -40,22 +40,6 @@ PRIMARY_MODEL = os.environ["MODEL_ID"]
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL_ID")
 CURRENT_TODOS: list[dict] = []
 
-# 常量
-
-ESCALATED_MAX_TOKENS = 64000
-DEFAULT_MAX_TOKENS = 8000
-MAX_RECOVERY_RETRIES = 3
-MAX_RETRIES = 10
-BASE_DELAY_MS = 500
-MAX_CONSECUTIVE_529 = 3
-CONTINUATION_PROMPT = (
-    "Output token limit hit. Resume directly — "
-    "no apology, no recap. Pick up mid-thought."
-)
-
-
-""" v16 agent team """
-
 
 # 基于文件的收信箱，每个agent都有一个.jsonl收信箱
 class MessageBus:
@@ -156,6 +140,86 @@ def match_response(response_type: str, request_id: str, approve: bool):
     )
 
 
+""" v17 自主agent """
+
+IDLE_POLL_INTERVAL = 5
+IDLE_TIMEOUT = 60
+
+
+# 查找所有依赖项已completed的pending和unwoned任务
+def scan_unclaimed_tasks() -> list[dict]:
+    unclaimed = []
+    for f in sorted(TASKS_DIR.glob("task_*.json")):
+        task = json.loads(f.read_text())
+        if (
+            task.get("status") == "pending"
+            and not task.get("owner")
+            and can_start(task["id"])
+        ):
+            unclaimed.append(task)
+    return unclaimed
+
+
+# 每隔IDLE_POLL_INTERVAL秒轮询一次，返回work, shutdown或timeout
+def idle_poll(name: str, messages: list, role: str) -> str:
+    for _ in range(IDLE_TIMEOUT // IDLE_POLL_INTERVAL):
+        time.sleep(IDLE_POLL_INTERVAL)
+
+        # 检查收件箱——首先发送协议消息
+        inbox = BUS.read_inbox(name)
+        if inbox:
+            # 检查shutdown_request
+            for msg in inbox:
+                if msg.get("type") == "shutdown_request":
+                    req_id = msg.get("metadata", {}).get("request_id", "")
+                    BUS.send(
+                        name,
+                        "lead",
+                        "Shutting down gracefully.",
+                        "shutdown_response",
+                        {"request_id": req_id, "approve": True},
+                    )
+                    print(
+                        f"  \033[35m[protocol] {name} approved shutdown "
+                        f"in idle ({req_id})\033[0m"
+                    )
+                    return "shutdown"
+
+            # 非协议收件箱：注入并恢复工作
+            messages.append(
+                {"role": "user", "content": "<inbox>" + json.dumps(inbox) + "</inbox>"}
+            )
+            print(f"  \033[36m[idle] {name} found inbox messages\033[0m")
+            return "work"
+
+        # 扫描任务板
+        unclaimed = scan_unclaimed_tasks()
+        if unclaimed:
+            # 申领任务版上的第一个任务
+            task = unclaimed[0]
+            result = claim_task(task["id"], name)
+            if "Claimed" in result:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": f"<auto-claimed>Task {task['id']}: "
+                        f"{task['subject']}</auto-claimed>",
+                    }
+                )
+                print(
+                    f"  \033[32m[idle] {name} auto-claimed: "
+                    f"{task['subject']}\033[0m"
+                )
+                return "work"
+            print(f"  \033[33m[idle] {name} claim failed: " f"{result}\033[0m")
+
+    print(f"  \033[31m[idle] {name} timeout ({IDLE_TIMEOUT}s)\033[0m")
+    return "timeout"
+
+
+""" v15-17 teammate thread """
+
+
 def consume_lead_inbox(route_protocol: bool = True) -> list[dict]:
     """阅读lead的收件箱。路由协议响应，返回所有消息。
     由 run_check_inbox() 和main loop调用以避免
@@ -184,7 +248,8 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
     system = (
         f"You are '{name}', a {role}. "
         f"Use tools to complete tasks. "
-        f"Check inbox for protocol messages (shutdown_request, etc)."
+        f"You can list and claim tasks from the board. "
+        f"Check inbox for protocol messages."
     )
 
     def handle_inbox_message(name: str, msg: dict, messages: list) -> bool:
@@ -213,7 +278,7 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                 messages.append(
                     {
                         "role": "user",
-                        "content": f"[Plan approved] Proceed with the task.",
+                        "content": "[Plan approved] Proceed with the task.",
                     }
                 )
             else:
@@ -223,7 +288,6 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                         "content": f"[Plan rejected] Feedback: {msg['content']}",
                     }
                 )
-
         return False  # continue
 
     def run():
@@ -280,7 +344,44 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                     "required": ["plan"],
                 },
             },
+            # v17 队友列出，申领与完成任务
+            {
+                "name": "list_tasks",
+                "description": "List all tasks on the board.",
+                "input_schema": {"type": "object", "properties": {}, "required": []},
+            },
+            {
+                "name": "claim_task",
+                "description": "Claim a pending task.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"task_id": {"type": "string"}},
+                    "required": ["task_id"],
+                },
+            },
+            {
+                "name": "complete_task",
+                "description": "Mark an in-progress task as completed.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"task_id": {"type": "string"}},
+                    "required": ["task_id"],
+                },
+            },
         ]
+
+        def _run_list_tasks():
+            tasks = list_tasks()
+            if not tasks:
+                return "No tasks."
+            return "\n".join(f"  {t.id}: {t.subject} [{t.status}]" for t in tasks)
+
+        def _run_claim_task(task_id: str):
+            return claim_task(task_id, owner=name)
+
+        def _run_complete_task(task_id: str):
+            return complete_task(task_id)
+
         sub_handlers = {
             "bash": run_bash,
             "read_file": run_read,
@@ -289,73 +390,81 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                 1
             ],
             "submit_plan": lambda plan: _teammate_submit_plan(name, plan),
+            "list_tasks": _run_list_tasks,
+            "claim_task": _run_claim_task,
+            "complete_task": _run_complete_task,
         }
 
-        shutdown_requested = False
-        while not shutdown_requested:
-            # 检查收件箱中的协议消息
-            inbox = BUS.read_inbox(name)
-            should_stop = False
-            non_protocol = []
-            for msg in inbox:
-                if msg.get("type") in ("shutdown_request", "plan_approval_response"):
-                    should_stop = handle_inbox_message(name, msg, messages)
-                    if should_stop:
-                        break
-                else:
-                    non_protocol.append(msg)
-            if should_stop:
-                shutdown_requested = True
-                break
-            if non_protocol:
-                inbox_json = json.dumps(non_protocol)
-                messages.append(
-                    {"role": "user", "content": "<inbox>" + inbox_json + "</inbox>"}
+        # 外循环：WORK → IDLE循环
+        while True:
+            # 当上下文被初始化或重置时重新注入身份
+            if len(messages) <= 3:
+                messages.insert(
+                    0,
+                    {
+                        "role": "user",
+                        "content": f"<identity>You are '{name}', role: {role}. "
+                        f"Continue your work.</identity>",
+                    },
                 )
 
-            # llm轮次
-            try:
-                response = client.messages.create(
-                    model=PRIMARY_MODEL,
-                    system=system,
-                    messages=messages[-20:],
-                    tools=sub_tools,
-                    max_tokens=8000,
-                )
-            except Exception:
-                break
-
-            messages.append({"role": "assistant", "content": response.content})
-            if response.stop_reason != "tool_use":
-                # 空闲状态：等待收件箱消息而不是退出
-                while not shutdown_requested:
-                    time.sleep(1)
-                    inbox = BUS.read_inbox(name)
-                    if not inbox:
-                        continue
-                    idle_msgs = []
-                    for msg in inbox:
-                        if msg.get("type") in (
-                            "shutdown_request",
-                            "plan_approval_response",
-                        ):
-                            should_stop = handle_inbox_message(name, msg, messages)
-                            if should_stop:
-                                shutdown_requested = True
-                                break
-                        else:
-                            idle_msgs.append(msg)
-                    if shutdown_requested:
+            # WORK phase
+            should_shutdown = False
+            for _ in range(10):
+                inbox = BUS.read_inbox(name)
+                for msg in inbox:
+                    stopped = handle_inbox_message(name, msg, messages)
+                    if stopped:
+                        should_shutdown = True
                         break
-                    if idle_msgs:
-                        inbox_json = json.dumps(idle_msgs)
+                if should_shutdown:
+                    break
+                if inbox and not should_shutdown:
+                    non_protocol = [m for m in inbox if m.get("type") == "message"]
+                    if non_protocol:
                         messages.append(
                             {
                                 "role": "user",
-                                "content": "<inbox>" + inbox_json + "</inbox>",
+                                "content": f"<inbox>{json.dumps(non_protocol)}</inbox>",
                             }
                         )
-                        break  # 返回到llm轮次并添加新消息
+
+                try:
+                    response = client.messages.create(
+                        model=PRIMARY_MODEL,
+                        system=system,
+                        messages=messages[-20:],
+                        tools=sub_tools,
+                        max_tokens=8000,
+                    )
+                except Exception:
+                    break
+                messages.append({"role": "assistant", "content": response.content})
+                if response.stop_reason != "tool_use":
+                    break
+                results = []
+                for block in response.content:
+                    if block.type == "tool_use":
+                        handler = sub_handlers.get(block.name)
+                        output = handler(**block.input) if handler else "Unknown"
+                        results.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": str(output),
+                            }
+                        )
+                messages.append({"role": "user", "content": results})
+
+            if should_shutdown:
+                break
+
+            # IDLE phase
+            idle_result = idle_poll(name, messages, role)
+            if idle_result == "shutdown":
+                break
+            if idle_result == "timeout":
+                break
 
             # 执行工具调用
             results = []
@@ -390,7 +499,7 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
     active_teammates[name] = True
     threading.Thread(target=run, daemon=True).start()
     print(f"  \033[36m[teammate] {name} spawned as {role}\033[0m")
-    return f"Teammate '{name}' spawned as {role}"
+    return f"Teammate '{name}' spawned as {role} (autonomous)"
 
 
 def _teammate_submit_plan(from_name: str, plan: str) -> str:
@@ -417,25 +526,32 @@ def _teammate_submit_plan(from_name: str, plan: str) -> str:
 
 """ v16 lead协议工具 """
 
+
 # lead向teammate发送shutdown_request
 def run_request_shutdown(teammate: str) -> str:
     req_id = new_request_id()
     pending_requests[req_id] = ProtocolState(
-        request_id=req_id, type="shutdown",
-        sender="lead", target=teammate,
-        status="pending", payload="")
-    BUS.send("lead", teammate, "Please shut down gracefully.",
-             "shutdown_request",
-             {"request_id": req_id})
-    print(f"  \033[35m[protocol] shutdown_request → {teammate} "
-          f"({req_id})\033[0m")
+        request_id=req_id,
+        type="shutdown",
+        sender="lead",
+        target=teammate,
+        status="pending",
+        payload="",
+    )
+    BUS.send(
+        "lead",
+        teammate,
+        "Please shut down gracefully.",
+        "shutdown_request",
+        {"request_id": req_id},
+    )
+    print(f"  \033[35m[protocol] shutdown_request → {teammate} " f"({req_id})\033[0m")
     return f"Shutdown request sent to {teammate} (req: {req_id})"
 
 
 # lead要求teammate提交任务计划
 def run_request_plan(teammate: str, task: str) -> str:
-    BUS.send("lead", teammate, f"Please submit a plan for: {task}",
-             "message")
+    BUS.send("lead", teammate, f"Please submit a plan for: {task}", "message")
     return f"Asked {teammate} to submit a plan"
 
 
@@ -447,17 +563,24 @@ def run_review_plan(request_id: str, approve: bool, feedback: str = "") -> str:
     if state.status != "pending":
         return f"Request {request_id} already {state.status}"
     state.status = "approved" if approve else "rejected"
-    BUS.send("lead", state.sender, feedback or ("Approved" if approve else "Rejected"),
-             "plan_approval_response",
-             {"request_id": request_id, "approve": approve})
+    BUS.send(
+        "lead",
+        state.sender,
+        feedback or ("Approved" if approve else "Rejected"),
+        "plan_approval_response",
+        {"request_id": request_id, "approve": approve},
+    )
     icon = "✓" if approve else "✗"
     print(f"  \033[32m[protocol] plan {icon} ({request_id})\033[0m")
     return f"Plan {'approved' if approve else 'rejected'} ({request_id})"
+
 
 """ 
 v15 agent team工具
 v16 lead其他工具
 """
+
+
 def run_spawn_teammate(name: str, role: str, prompt: str) -> str:
     return spawn_teammate_thread(name, role, prompt)
 
@@ -1734,35 +1857,37 @@ def run_cancel_cron(job_id: str) -> str:
 
 """ v16 工具分发 """
 
+
 # 执行工具调用块，返回输出
 def execute_tool(block) -> str:
     handler = {
         "bash": run_bash,
-    "read_file": run_read,
-    "write_file": run_write,
-    "edit_file": run_edit,
-    "glob": run_glob,
-    "todo_write": run_todo_write,
-    "task": spawn_subagent,
-    "load_skill": load_skill,
-    "create_task": run_create_task,
-    "list_tasks": run_list_tasks,
-    "get_task": run_get_task,
-    "claim_task": run_claim_task,
-    "complete_task": run_complete_task,
-    "schedule_cron": run_schedule_cron,
-    "list_crons": run_list_crons,
-    "cancel_cron": run_cancel_cron,
-    "spawn_teammate": run_spawn_teammate,
-    "send_message": run_send_message,
-    "check_inbox": run_check_inbox,
-    "request_shutdown": run_request_shutdown,
-    "request_plan": run_request_plan,
-    "review_plan": run_review_plan,
+        "read_file": run_read,
+        "write_file": run_write,
+        "edit_file": run_edit,
+        "glob": run_glob,
+        "todo_write": run_todo_write,
+        "task": spawn_subagent,
+        "load_skill": load_skill,
+        "create_task": run_create_task,
+        "list_tasks": run_list_tasks,
+        "get_task": run_get_task,
+        "claim_task": run_claim_task,
+        "complete_task": run_complete_task,
+        "schedule_cron": run_schedule_cron,
+        "list_crons": run_list_crons,
+        "cancel_cron": run_cancel_cron,
+        "spawn_teammate": run_spawn_teammate,
+        "send_message": run_send_message,
+        "check_inbox": run_check_inbox,
+        "request_shutdown": run_request_shutdown,
+        "request_plan": run_request_plan,
+        "review_plan": run_review_plan,
     }.get(block.name)
     if handler:
         return handler(**block.input)
     return f"Unknown tool: {block.name}"
+
 
 """ v14 cron调度程序 """
 
@@ -1979,25 +2104,37 @@ TOOLS = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     # v16 protocol工具
-    {"name": "request_shutdown",
-     "description": "Request a teammate to shut down gracefully.",
-     "input_schema": {"type": "object",
-                      "properties": {"teammate": {"type": "string"}},
-                      "required": ["teammate"]}},
-    {"name": "request_plan",
-     "description": "Ask a teammate to submit a plan for review.",
-     "input_schema": {"type": "object",
-                      "properties": {"teammate": {"type": "string"},
-                                     "task": {"type": "string"}},
-                      "required": ["teammate", "task"]}},
-    {"name": "review_plan",
-     "description": "Approve or reject a submitted plan by request_id.",
-     "input_schema": {"type": "object",
-                      "properties": {
-                          "request_id": {"type": "string"},
-                          "approve": {"type": "boolean"},
-                          "feedback": {"type": "string"}},
-                      "required": ["request_id", "approve"]}},
+    {
+        "name": "request_shutdown",
+        "description": "Request a teammate to shut down gracefully.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"teammate": {"type": "string"}},
+            "required": ["teammate"],
+        },
+    },
+    {
+        "name": "request_plan",
+        "description": "Ask a teammate to submit a plan for review.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"teammate": {"type": "string"}, "task": {"type": "string"}},
+            "required": ["teammate", "task"],
+        },
+    },
+    {
+        "name": "review_plan",
+        "description": "Approve or reject a submitted plan by request_id.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "request_id": {"type": "string"},
+                "approve": {"type": "boolean"},
+                "feedback": {"type": "string"},
+            },
+            "required": ["request_id", "approve"],
+        },
+    },
 ]
 
 TOOL_HANDLERS = {
@@ -2187,6 +2324,18 @@ def has_pending_background() -> bool:
 
 
 """ v11 错误恢复 """
+
+# 常量
+ESCALATED_MAX_TOKENS = 64000
+DEFAULT_MAX_TOKENS = 8000
+MAX_RECOVERY_RETRIES = 3
+MAX_RETRIES = 10
+BASE_DELAY_MS = 500
+MAX_CONSECUTIVE_529 = 3
+CONTINUATION_PROMPT = (
+    "Output token limit hit. Resume directly — "
+    "no apology, no recap. Pick up mid-thought."
+)
 
 
 # 跟踪整个循环的恢复尝试
@@ -2727,12 +2876,12 @@ def run_agent_turn(user_query: str | None = None):
 
 
 if __name__ == "__main__":
-    print("Version 16: Team Protocol")
+    print("Version 17: Autonomous Agent")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     while True:
         try:
-            query = input("\033[36ms16 >> \033[0m")
+            query = input("\033[36ms17 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):
@@ -2744,9 +2893,11 @@ if __name__ == "__main__":
         inbox_msgs = consume_lead_inbox(route_protocol=True)
         if inbox_msgs:
             inbox_text = "\n".join(
-                f"From {m['from']}: {m['content'][:200]}" for m in inbox_msgs)
-            session_history.append({"role": "user",
-                            "content": f"[Inbox]\n{inbox_text}"})
+                f"From {m['from']}: {m['content'][:200]}" for m in inbox_msgs
+            )
+            session_history.append(
+                {"role": "user", "content": f"[Inbox]\n{inbox_text}"}
+            )
             print(f"\n\033[33m[Inbox: {len(inbox_msgs)} messages injected]\033[0m")
             # 让 agent 处理队友消息
             run_agent_turn()
