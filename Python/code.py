@@ -43,8 +43,129 @@ FALLBACK_MODEL = os.getenv("FALLBACK_MODEL_ID")
 CURRENT_TODOS: list[dict] = []
 VALID_WT_NAME = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
-# v18 worktree system
+""" v19 MCP """
 
+# 发现并调用 MCP server上的工具
+class MCPClient:
+
+    def __init__(self, name: str):
+        self.name = name
+        self.tools: list[dict] = []
+        self._handlers: dict[str, callable] = {}
+
+    def register(self, tool_defs: list[dict],
+                 handlers: dict[str, callable]):
+        self.tools = tool_defs
+        self._handlers = handlers
+
+    def call_tool(self, tool_name: str, args: dict) -> str:
+        handler = self._handlers.get(tool_name)
+        if not handler:
+            return f"MCP error: unknown tool '{tool_name}'"
+        try:
+            return handler(**args)
+        except Exception as e:
+            return f"MCP error: {e}"
+
+
+mcp_clients: dict[str, MCPClient] = {}
+
+_DISALLOWED_CHARS = re.compile(r'[^a-zA-Z0-9_-]')
+
+
+# 规范化mcp工具名，将将非[a-zA-Z0-9_-]的字符替换为下划线
+def normalize_mcp_name(name: str) -> str:
+    return _DISALLOWED_CHARS.sub('_', name)
+
+
+def _mock_server_docs():
+    client = MCPClient("docs")
+    client.register(
+        tool_defs=[
+            {"name": "search", "description": "Search documentation. (readOnly)",
+             "inputSchema": {"type": "object",
+                             "properties": {"query": {"type": "string"}},
+                             "required": ["query"]}},
+            {"name": "get_version", "description": "Get API version. (readOnly)",
+             "inputSchema": {"type": "object", "properties": {},
+                             "required": []}},
+        ],
+        handlers={
+            "search": lambda query: f"[docs] Found 3 results for '{query}'",
+            "get_version": lambda: "[docs] API v2.1.0",
+        })
+    return client
+
+
+def _mock_server_deploy():
+    client = MCPClient("deploy")
+    client.register(
+        tool_defs=[
+            {"name": "trigger",
+             "description": "Trigger a deployment. (destructive — requires approval in real CC)",
+             "inputSchema": {"type": "object",
+                             "properties": {"service": {"type": "string"}},
+                             "required": ["service"]}},
+            {"name": "status", "description": "Check deployment status. (readOnly)",
+             "inputSchema": {"type": "object",
+                             "properties": {"service": {"type": "string"}},
+                             "required": ["service"]}},
+        ],
+        handlers={
+            "trigger": lambda service: f"[deploy] Triggered: {service}",
+            "status": lambda service: f"[deploy] {service}: running (v1.4.2)",
+        })
+    return client
+
+
+MOCK_SERVERS = {
+    "docs": _mock_server_docs,
+    "deploy": _mock_server_deploy,
+}
+
+
+def connect_mcp(name: str) -> str:
+    if name in mcp_clients:
+        return f"MCP server '{name}' already connected"
+    factory = MOCK_SERVERS.get(name)
+    if not factory:
+        available = ", ".join(MOCK_SERVERS.keys())
+        return f"Unknown server '{name}'. Available: {available}"
+    mcp_client = factory()
+    mcp_clients[name] = mcp_client
+    tool_names = [t["name"] for t in mcp_client.tools]
+    print(f"  \033[31m[mcp] connected: {name} → {tool_names}\033[0m")
+    return (f"Connected to MCP server '{name}'. "
+            f"Discovered {len(mcp_client.tools)} tools: {', '.join(tool_names)}")
+
+
+# 将内置工具 + 所有 MCP 工具组装到一个工具池中
+def assemble_tool_pool() -> tuple[list[dict], dict]:
+    tools = list(BUILTIN_TOOLS)
+    handlers = dict(BUILTIN_HANDLERS)
+    for server_name, mcp_client in mcp_clients.items():
+        safe_server = normalize_mcp_name(server_name)
+        for tool_def in mcp_client.tools:
+            safe_tool = normalize_mcp_name(tool_def["name"])
+            prefixed = f"mcp__{safe_server}__{safe_tool}"
+            tools.append({
+                "name": prefixed,
+                "description": tool_def.get("description", ""),
+                "input_schema": tool_def.get("inputSchema", {}),
+            })
+            # *：禁止位置传参，之后参数按name=value形式传入，所有lambda共享同一个mcp_client（循环结束后最后一个值）
+            # **kw：收集所有剩余关键字参数（即用户调用工具时传入的参数）
+            # c.call_tool(t, kw)：调用MCPClient的call_tool方法，传入工具名t和参数字典kw
+            handlers[prefixed] = (
+                lambda *, c=mcp_client, t=tool_def["name"], **kw: c.call_tool(t, kw))
+    return tools, handlers
+
+
+def run_connect_mcp(name: str) -> str:
+    return connect_mcp(name)
+
+
+# v18 worktree system
 
 # 验证工作树名称，无效返回错误信息，有效则返回 None
 def validate_worktree_name(name: str) -> str | None:
@@ -176,8 +297,6 @@ def keep_worktree(name: str) -> str:
     log_event("keep", name)
     print(f"  \033[36m[worktree] kept: {name}\033[0m")
     return f"Worktree '{name}' kept for review (branch: wt/{name})"
-
-
 
 
 # 基于文件的收信箱，每个agent都有一个.jsonl收信箱
@@ -433,7 +552,7 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
 
     def run():
         wt_ctx = {"path": None}
-        
+
         def _wt_cwd() -> Path | None:
             p = wt_ctx["path"]
             return Path(p) if p else None
@@ -446,7 +565,7 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
 
         def _run_write(path: str, content: str) -> str:
             return run_write(path, content, cwd=_wt_cwd())
-        
+
         def _run_list_tasks():
             tasks = list_tasks()
             if not tasks:
@@ -472,7 +591,7 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
             result = complete_task(task_id)
             wt_ctx["path"] = None
             return result
-        
+
         messages = [{"role": "user", "content": prompt}]
         sub_tools = [
             {
@@ -551,7 +670,6 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                 },
             },
         ]
-
 
         sub_handlers = {
             "bash": _run_bash,
@@ -778,6 +896,7 @@ def run_check_inbox() -> str:
 
 """ v18 lead worktree工具 """
 
+
 def run_create_worktree(name: str, task_id: str = "") -> str:
     return create_worktree(name, task_id)
 
@@ -789,7 +908,10 @@ def run_remove_worktree(name: str, discard_changes: bool = False) -> str:
 def run_keep_worktree(name: str) -> str:
     return keep_worktree(name)
 
+
 """ v14 cron """
+
+
 @dataclass
 class CronJob:
     id: str
@@ -1172,53 +1294,9 @@ def assemble_system_prompt(context: dict) -> str:
     return "\n\n".join(sections)
 
 
-_last_context_key = None
-_last_prompt = None
 
 
-def get_system_prompt(context: dict) -> str:
-    """缓存包装器——仅在上下文更改时重新组装。
 
-    使用 json.dumps 进行确定性序列化，而不是 Python 的 hash()
-    它具有过程随机化并且在嵌套字典/列表上失败。
-    此缓存仅避免进程内冗余的字符串组装。
-    Real Claude Code 还通过以下方式保护 API 级提示缓存：
-    稳定的节排序和 SYSTEM_PROMPT_DYNAMIC_BOUNDARY。
-    """
-    global _last_context_key, _last_prompt
-    key = json.dumps(context, sort_keys=True, ensure_ascii=False, default=str)
-    if key == _last_context_key and _last_prompt:
-        print("  \033[90m[cache hit] system prompt unchanged\033[0m")
-        return _last_prompt
-    # 更新缓存
-    _last_context_key = key
-    # 重新组装提示词
-    _last_prompt = assemble_system_prompt(context)
-    # 打印调试日志，显示加载的prompt sections
-    loaded = ["identity", "tools", "workspace"]
-    skills = context.get("skills_catalog", "")
-    if skills and skills != "(no skills found)":
-        loaded.append("skills")
-    if context.get("memories"):
-        loaded.append("memory")
-        loaded.append("instructions")
-    print(f"  \033[32m[assembled] sections: {', '.join(loaded)}\033[0m")
-    return _last_prompt
-
-
-# 从真实状态导出上下文
-def update_context() -> dict:
-    memories = ""
-    if MEMORY_INDEX.exists():
-        content = MEMORY_INDEX.read_text().strip()
-        if content:
-            memories = content
-    return {
-        "enabled_tools": list(TOOL_HANDLERS.keys()),
-        "workspace": str(WORKDIR),
-        "memories": memories,
-        "skills_catalog": list_skills(),
-    }
 
 
 """ v9 记忆系统 """
@@ -2772,6 +2850,23 @@ register_hook("PostToolUse", large_output_hook)
 register_hook("UserPromptSubmit", context_inject_hook)
 register_hook("Stop", summary_hook)
 
+
+
+# 从真实状态导出上下文
+def update_context() -> dict:
+    memories = ""
+    if MEMORY_INDEX.exists():
+        content = MEMORY_INDEX.read_text().strip()
+        if content:
+            memories = content
+    return {
+        "enabled_tools": list(TOOL_HANDLERS.keys()),
+        "workspace": str(WORKDIR),
+        "memories": memories,
+        "skills_catalog": list_skills(),
+    }
+
+
 """ 
 v2 修改工具执行部分
 v3 插入检查权限函数
@@ -2800,8 +2895,9 @@ def agent_loop(messages: list, context: dict):
         if messages and isinstance(messages[-1].get("content"), str)
         else None
     )
-    # v10 首次 system prompt 将从 context 中组装（skills + memories + instructions）
-    system = get_system_prompt(context)
+    # v19 动态组装工具
+    tools, handlers = assemble_tool_pool()
+    system = assemble_system_prompt(context)
     # v11 定义错误恢复变量
     state = RecoveryState()
     max_tokens = DEFAULT_MAX_TOKENS
@@ -2869,7 +2965,7 @@ def agent_loop(messages: list, context: dict):
                         model=mdl,
                         system=system,
                         messages=messages,
-                        tools=TOOLS,
+                        tools=tools,
                         max_tokens=mt,
                     ),
                     state,
@@ -3053,11 +3149,19 @@ def agent_loop(messages: list, context: dict):
 
             # 压缩未被调用
             # 将工具结果反馈回消息列表，循环继续
+            handler = handlers.get(block.name)
+            output = handler(**block.input) if handler else "Unknown"
+            print(str(output)[:300])
+            results.append({"type": "tool_result",
+                            "tool_use_id": block.id, "content": output})
             messages.append({"role": "user", "content": results})
 
             # 每轮工具后重新评估上下文和提示
-            context = update_context()
-            system = get_system_prompt(context)
+            if any(b.name == "connect_mcp" for b in response.content
+               if b.type == "tool_use"):
+                tools, handlers = assemble_tool_pool()
+                context = update_context()
+                system = assemble_system_prompt(context)
             continue
         # 压缩被调用，results已附加到上方，继续下一轮while，不能再继续处理其他 block
         continue
@@ -3105,12 +3209,12 @@ def run_agent_turn(user_query: str | None = None):
 
 
 if __name__ == "__main__":
-    print("Version 18: WorkTree")
+    print("Version 19: MCP")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     while True:
         try:
-            query = input("\033[36ms18 >> \033[0m")
+            query = input("\033[36ms19 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):
