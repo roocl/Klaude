@@ -1,9 +1,18 @@
-import ast, json, os, subprocess, time, re, random, yaml, threading
+import ast
+import json
+import os
+import random
+import re
+import subprocess
+import threading
+import time
+import queue
 
-from pathlib import Path
+from dataclasses import asdict, dataclass
 from datetime import datetime
-from dataclasses import dataclass, asdict
+from pathlib import Path
 
+import yaml
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
@@ -24,6 +33,8 @@ MEMORY_INDEX = MEMORY_DIR / "MEMORY.md"
 TASKS_DIR = WORKDIR / ".tasks"
 TASKS_DIR.mkdir(exist_ok=True)
 DURABLE_PATH = WORKDIR / ".scheduled_tasks.json"
+MAILBOX_DIR = WORKDIR / ".mailboxes"
+MAILBOX_DIR.mkdir(exist_ok=True)
 
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 PRIMARY_MODEL = os.environ["MODEL_ID"]
@@ -42,6 +53,195 @@ CONTINUATION_PROMPT = (
     "Output token limit hit. Resume directly — "
     "no apology, no recap. Pick up mid-thought."
 )
+
+
+""" v15 agent team """
+
+
+# 基于文件的收信箱，每个agent都有一个.jsonl收信箱
+class MessageBus:
+
+    def send(
+        self, from_agent: str, to_agent: str, content: str, msg_type: str = "message"
+    ):
+        msg = {
+            "from": from_agent,
+            "to": to_agent,
+            "content": content,
+            "type": msg_type,
+            "ts": time.time(),
+        }
+        inbox = MAILBOX_DIR / f"{to_agent}.jsonl"
+        with open(inbox, "a") as f:
+            f.write(json.dumps(msg) + "\n")
+        print(f"  \033[33m[bus] {from_agent} → {to_agent}: " f"{content[:50]}\033[0m")
+
+    def read_inbox(self, agent: str) -> list[dict]:
+        inbox = MAILBOX_DIR / f"{agent}.jsonl"
+        if not inbox.exists():
+            return []
+        msgs = [
+            json.loads(line) for line in inbox.read_text().splitlines() if line.strip()
+        ]
+        # 消费信息，读取并删除
+        inbox.unlink()
+        return msgs
+
+    def peek(self, agent: str) -> bool:
+        """非破坏性：如果代理有未读收件箱邮件，则为真。
+
+        Lead 的收件箱轮询器使用此信息，来决定是否在不消耗邮箱的情况下唤醒轮询。"""
+        inbox = MAILBOX_DIR / f"{agent}.jsonl"
+        return inbox.exists() and inbox.stat().st_size > 0
+
+
+BUS = MessageBus()
+
+# 追踪生成的队友
+active_teammates: dict[str, bool] = {}
+
+
+def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
+    """在后台线程中生成一个队友代理。
+    教学版本：每位队友最多 10 轮。
+    真实CC：队友使用空闲循环（等待收件箱，工作，重复）
+    直到 shutdown_request。"""
+    if name in active_teammates:
+        return f"Teammate '{name}' already exists"
+
+    system = (
+        f"You are '{name}', a {role}. "
+        f"Use tools to complete tasks. "
+        f"Send results via send_message to 'lead'."
+    )
+
+    def run():
+        messages = [{"role": "user", "content": prompt}]
+        sub_tools = [
+            {
+                "name": "bash",
+                "description": "Run a shell command.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+            {
+                "name": "read_file",
+                "description": "Read file contents.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+            {
+                "name": "write_file",
+                "description": "Write content to a file.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+            {
+                "name": "send_message",
+                "description": "Send a message to another agent.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "to": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["to", "content"],
+                },
+            },
+        ]
+        sub_handlers = {
+            "bash": run_bash,
+            "read_file": run_read,
+            "write_file": run_write,
+            "send_message": lambda to, content: (BUS.send(name, to, content), "Sent")[
+                1
+            ],
+        }
+
+        for _ in range(10):
+            inbox = BUS.read_inbox(name)
+            if inbox:
+                messages.append(
+                    {"role": "user", "content": f"<inbox>{json.dumps(inbox)}</inbox>"}
+                )
+            try:
+                response = client.messages.create(
+                    model=PRIMARY_MODEL,
+                    system=system,
+                    messages=messages[-20:],
+                    tools=sub_tools,
+                    max_tokens=8000,
+                )
+            except Exception:
+                break
+            messages.append({"role": "assistant", "content": response.content})
+            if response.stop_reason != "tool_use":
+                break
+            results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    handler = sub_handlers.get(block.name)
+                    output = handler(**block.input) if handler else "Unknown"
+                    results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": str(output),
+                        }
+                    )
+            messages.append({"role": "user", "content": results})
+
+        # 将最终摘要发送给 Lead
+        summary = "Done."
+        for msg in reversed(messages):
+            if msg["role"] == "assistant" and isinstance(msg["content"], list):
+                for b in msg["content"]:
+                    if getattr(b, "type", None) == "text":
+                        summary = b.text
+                        break
+                else:
+                    continue
+                break
+        BUS.send(name, "lead", summary, "result")
+        active_teammates.pop(name, None)
+        print(f"  \033[32m[teammate] {name} finished\033[0m")
+
+    active_teammates[name] = True
+    threading.Thread(target=run, daemon=True).start()
+    print(f"  \033[36m[teammate] {name} spawned as {role}\033[0m")
+    return f"Teammate '{name}' spawned as {role}"
+
+
+def run_spawn_teammate(name: str, role: str, prompt: str) -> str:
+    return spawn_teammate_thread(name, role, prompt)
+
+
+def run_send_message(to: str, content: str) -> str:
+    BUS.send("lead", to, content)
+    return f"Sent to {to}"
+
+
+def run_check_inbox() -> str:
+    msgs = BUS.read_inbox("lead")
+    if not msgs:
+        return "(inbox empty)"
+    lines = []
+    for m in msgs:
+        lines.append(f"  [{m['from']}] {m['content'][:200]}")
+    return "\n".join(lines)
+
 
 """ v14 cron调度程序 """
 
@@ -1229,26 +1429,6 @@ def compact_history(messages):
     return [{"role": "user", "content": f"[Compacted]\n\n{summary}"}]
 
 
-# 紧急压缩 reactive Compact，在API错误时使用
-def reactive_compact(messages):
-    transcript = write_transcript(messages)
-    # 从尾部进行回退，保留最后5条消息，前面的消息进行摘要
-    tail_start = max(0, len(messages) - 5)
-    # 避免留下孤立tool_result
-    if (
-        tail_start > 0
-        and tail_start < len(messages)
-        and _is_tool_result_message(messages[tail_start])
-        and _message_has_tool_use(messages[tail_start - 1])
-    ):
-        tail_start -= 1
-    summary = summarize_history(messages[:tail_start])
-    return [
-        {"role": "user", "content": f"[Reactive compact]\n\n{summary}"},
-        *messages[tail_start:],
-    ]
-
-
 """ v12 task工具 """
 
 
@@ -1502,6 +1682,34 @@ TOOLS = [
             "required": ["job_id"],
         },
     },
+    # v15 agent team工具
+    {
+        "name": "spawn_teammate",
+        "description": "Spawn a teammate agent in a background thread.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "role": {"type": "string"},
+                "prompt": {"type": "string"},
+            },
+            "required": ["name", "role", "prompt"],
+        },
+    },
+    {
+        "name": "send_message",
+        "description": "Send a message to a teammate via MessageBus.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"to": {"type": "string"}, "content": {"type": "string"}},
+            "required": ["to", "content"],
+        },
+    },
+    {
+        "name": "check_inbox",
+        "description": "Check Lead's inbox for teammate messages.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
 ]
 
 TOOL_HANDLERS = {
@@ -1521,6 +1729,9 @@ TOOL_HANDLERS = {
     "schedule_cron": run_schedule_cron,
     "list_crons": run_list_crons,
     "cancel_cron": run_cancel_cron,
+    "spawn_teammate": run_spawn_teammate,
+    "send_message": run_send_message,
+    "check_inbox": run_check_inbox,
 }
 
 """ v8 子agent工具定义与映射 """
@@ -1586,7 +1797,7 @@ SUB_HANDLERS = {
 }
 
 
-""" v13 背景task """
+""" v13 后台task """
 
 _bg_counter = 0
 background_tasks: dict[str, dict] = {}  # bg_id → {tool_use_id, command, status}
@@ -1684,6 +1895,12 @@ def collect_background_results() -> list[str]:
             f"{task['command'][:40]} ({len(output)} chars)\033[0m"
         )
     return notifications
+
+
+# 非破坏性：如果任何后台任务为completed并且正在等待被收集，则为真。收件箱轮询器在其唤醒状态下使用此功能
+def has_pending_background() -> bool:
+    with background_lock:
+        return any(t["status"] == "completed" for t in background_tasks.values())
 
 
 """ v11 错误恢复 """
@@ -2187,6 +2404,7 @@ def agent_loop(messages: list, context: dict):
 
 session_history: list = []
 session_context = update_context({}, [])
+had_teammates = False
 
 
 # 打印最新助手消息中的文本块
@@ -2209,12 +2427,20 @@ def print_latest_assistant_text(messages: list):
 
 # 运行一个agent轮次。调用者必须持有agent_lock
 def run_agent_turn_locked(user_query: str | None = None):
-    global session_context
+    global session_context, had_teammates
     if user_query is not None:
         session_history.append({"role": "user", "content": user_query})
     session_context = agent_loop(session_history, session_context)
     session_context = update_context(session_context, session_history)
     print_latest_assistant_text(session_history)
+
+    # 当所有队友线程都完成后通知一次
+    if active_teammates:
+        had_teammates = True
+    # 之前有队友且lead收件箱为空且没有后台任务结果待收集
+    elif had_teammates and not BUS.peek("lead") and not has_pending_background():
+        print("\033[32m[all teammates done]\033[0m")
+        had_teammates = False
     print()
 
 
@@ -2237,17 +2463,65 @@ def queue_processor_loop():
 
 
 if __name__ == "__main__":
-    print("Version 14: Cron scheduler")
+    print("Version 15: Agent Team")
     print("输入问题，回车发送。输入 q 退出。\n")
+
+    # v15 事件驱动的多线程主循环
+
+    # 线程安全的事件队列
+    events = queue.Queue()
+
+    # 用户输入线程
+    def input_reader():
+        while True:
+            try:
+                line = input("\033[36ms15 >> \033[0m")
+            except (EOFError, KeyboardInterrupt):
+                events.put(("quit", None))
+                return
+            events.put(("user", line))
+
+    # 收件箱轮询线程
+    def inbox_poller():
+        """每隔约 1 秒轮询一次，并在异步结果准备就绪时（例如队友收件箱消息或已完成的后台任务）唤醒负责人。不要限制活跃队友：队友发送结果后会移除自身，因此最终消息的生命周期可能超过其注册表项的生命周期。"""
+        while True:
+            time.sleep(1)
+            if BUS.peek("lead") or has_pending_background():
+                events.put(("wake", None))
+
+    threading.Thread(target=input_reader, daemon=True).start()
+    threading.Thread(target=inbox_poller, daemon=True).start()
 
     # v14 启动线程
     threading.Thread(target=queue_processor_loop, daemon=True).start()
     while True:
-        try:
-            query = input("\033[36ms14 >> \033[0m")
-        except (EOFError, KeyboardInterrupt):
+        kind, payload = events.get()
+        if kind == "quit":
             break
-        if query.strip().lower() in ("q", "exit", ""):
-            break
-        with agent_lock:
-            run_agent_turn_locked(query)
+        if kind == "user":
+            if payload.strip().lower() in ("q", "exit", ""):
+                break
+            session_history.append({"role": "user", "content": payload})
+            with agent_lock:
+                run_agent_turn_locked(payload)
+        else:  # 队友收件箱或后台结果已准备好，读取收件箱 + 收集后台结果，注入到历史
+            parts = []
+            inbox = BUS.read_inbox("lead")
+            if inbox:
+                parts.append(
+                    "[Inbox]\n"
+                    + "\n".join(
+                        f"From {m['from']}: {m['content'][:200]}" for m in inbox
+                    )
+                )
+            bg = collect_background_results()
+            parts.extend(bg)
+            if not parts:
+                continue  # 已经被较早的唤醒耗尽（幂等）
+            session_history.append({"role": "user", "content": "\n".join(parts)})
+            print(
+                f"\n\033[33m[wake: {len(inbox)} inbox + {len(bg)} background "
+                f"-> new turn]\033[0m"
+            )
+            with agent_lock:
+                run_agent_turn_locked()
