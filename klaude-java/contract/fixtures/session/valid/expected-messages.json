@@ -1,0 +1,29 @@
+[
+  {
+    "content": "读取文档",
+    "role": "user"
+  },
+  {
+    "content": [
+      {
+        "id": "tool-001",
+        "input": {
+          "path": "文档.txt"
+        },
+        "name": "read_file",
+        "type": "tool_use"
+      }
+    ],
+    "role": "assistant"
+  },
+  {
+    "content": [
+      {
+        "content": "文件内容",
+        "tool_use_id": "tool-001",
+        "type": "tool_result"
+      }
+    ],
+    "role": "user"
+  }
+]

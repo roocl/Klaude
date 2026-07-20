@@ -1,0 +1,142 @@
+[
+  {
+    "event_types": [
+      "step.started",
+      "step.finished"
+    ],
+    "messages": [
+      {
+        "content": "contract goal",
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "text": "done",
+            "type": "text"
+          }
+        ],
+        "role": "assistant"
+      }
+    ],
+    "name": "end_turn_at_step_limit",
+    "reason": null,
+    "reraised": false,
+    "result": "done",
+    "status": "success",
+    "step": 1
+  },
+  {
+    "event_types": [
+      "step.started",
+      "step.finished"
+    ],
+    "messages": [
+      {
+        "content": "contract goal",
+        "role": "user"
+      },
+      {
+        "content": [],
+        "role": "assistant"
+      }
+    ],
+    "name": "exceeded_max_steps",
+    "reason": "exceeded_max_steps",
+    "reraised": false,
+    "result": "",
+    "status": "failed",
+    "step": 1
+  },
+  {
+    "event_types": [
+      "step.started",
+      "step.finished",
+      "step.started",
+      "step.finished"
+    ],
+    "messages": [
+      {
+        "content": "contract goal",
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "id": "tool-partial",
+            "input": {},
+            "name": "read_file",
+            "type": "tool_use"
+          }
+        ],
+        "role": "assistant"
+      },
+      {
+        "content": [
+          {
+            "content": "Error: output token limit reached before this tool call could be completed. Please break the task into smaller steps and try again.",
+            "is_error": true,
+            "tool_use_id": "tool-partial",
+            "type": "tool_result"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "text": "recovered",
+            "type": "text"
+          }
+        ],
+        "role": "assistant"
+      }
+    ],
+    "name": "max_tokens_balances_tool_use",
+    "reason": null,
+    "reraised": false,
+    "result": "recovered",
+    "status": "success",
+    "step": 2,
+    "synthetic_result": {
+      "content": "Error: output token limit reached before this tool call could be completed. Please break the task into smaller steps and try again.",
+      "is_error": true,
+      "tool_use_id": "tool-partial",
+      "type": "tool_result"
+    }
+  },
+  {
+    "event_types": [
+      "step.started"
+    ],
+    "messages": [
+      {
+        "content": "contract goal",
+        "role": "user"
+      }
+    ],
+    "name": "llm_error",
+    "reason": "llm_error",
+    "reraised": false,
+    "result": "",
+    "status": "failed",
+    "step": 1
+  },
+  {
+    "event_types": [
+      "step.started"
+    ],
+    "messages": [
+      {
+        "content": "contract goal",
+        "role": "user"
+      }
+    ],
+    "name": "cancelled",
+    "reason": "cancelled",
+    "reraised": true,
+    "result": "",
+    "status": "failed",
+    "step": 1
+  }
+]

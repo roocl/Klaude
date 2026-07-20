@@ -1,0 +1,4 @@
+[agent]
+description = "Plans implementation work and identifies risks."
+system_prompt = "Create a concise plan with explicit verification steps."
+allowed_tools = ["read_file", "list_dir", "agent_result"]

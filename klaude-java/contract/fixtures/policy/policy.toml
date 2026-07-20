@@ -1,0 +1,7 @@
+[always]
+read_file = "allow"
+bash = "deny"
+ignored = "ask"
+
+[other]
+write_file = "allow"

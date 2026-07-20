@@ -1,0 +1,260 @@
+{
+  "$defs": {
+    "AgentRunCommand": {
+      "properties": {
+        "goal": {
+          "title": "Goal",
+          "type": "string"
+        },
+        "type": {
+          "const": "agent.run",
+          "default": "agent.run",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "goal"
+      ],
+      "title": "AgentRunCommand",
+      "type": "object"
+    },
+    "EventSubscribeCommand": {
+      "properties": {
+        "replay_from_run": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Replay From Run"
+        },
+        "scope": {
+          "default": "global",
+          "title": "Scope",
+          "type": "string"
+        },
+        "topics": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Topics",
+          "type": "array"
+        },
+        "type": {
+          "const": "event.subscribe",
+          "default": "event.subscribe",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "topics"
+      ],
+      "title": "EventSubscribeCommand",
+      "type": "object"
+    },
+    "PermissionRespondCommand": {
+      "properties": {
+        "decision": {
+          "title": "Decision",
+          "type": "string"
+        },
+        "tool_use_id": {
+          "title": "Tool Use Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "permission.respond",
+          "default": "permission.respond",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_use_id",
+        "decision"
+      ],
+      "title": "PermissionRespondCommand",
+      "type": "object"
+    },
+    "PingCommand": {
+      "properties": {
+        "client": {
+          "title": "Client",
+          "type": "string"
+        },
+        "type": {
+          "const": "core.ping",
+          "default": "core.ping",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "client"
+      ],
+      "title": "PingCommand",
+      "type": "object"
+    },
+    "SessionCloseCommand": {
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "session.close",
+          "default": "session.close",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "title": "SessionCloseCommand",
+      "type": "object"
+    },
+    "SessionCompactCommand": {
+      "properties": {
+        "focus": {
+          "default": "",
+          "title": "Focus",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "session.compact",
+          "default": "session.compact",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "title": "SessionCompactCommand",
+      "type": "object"
+    },
+    "SessionCreateCommand": {
+      "properties": {
+        "mode": {
+          "default": "chat",
+          "enum": [
+            "one_shot",
+            "chat"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "title": {
+          "default": "",
+          "title": "Title",
+          "type": "string"
+        },
+        "type": {
+          "const": "session.create",
+          "default": "session.create",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "SessionCreateCommand",
+      "type": "object"
+    },
+    "SessionGetHistoryCommand": {
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "session.get_history",
+          "default": "session.get_history",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "title": "SessionGetHistoryCommand",
+      "type": "object"
+    },
+    "SessionSendMessageCommand": {
+      "properties": {
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "session.send_message",
+          "default": "session.send_message",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "content"
+      ],
+      "title": "SessionSendMessageCommand",
+      "type": "object"
+    }
+  },
+  "discriminator": {
+    "mapping": {
+      "agent.run": "#/$defs/AgentRunCommand",
+      "core.ping": "#/$defs/PingCommand",
+      "event.subscribe": "#/$defs/EventSubscribeCommand",
+      "permission.respond": "#/$defs/PermissionRespondCommand",
+      "session.close": "#/$defs/SessionCloseCommand",
+      "session.compact": "#/$defs/SessionCompactCommand",
+      "session.create": "#/$defs/SessionCreateCommand",
+      "session.get_history": "#/$defs/SessionGetHistoryCommand",
+      "session.send_message": "#/$defs/SessionSendMessageCommand"
+    },
+    "propertyName": "type"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/PingCommand"
+    },
+    {
+      "$ref": "#/$defs/AgentRunCommand"
+    },
+    {
+      "$ref": "#/$defs/EventSubscribeCommand"
+    },
+    {
+      "$ref": "#/$defs/SessionCreateCommand"
+    },
+    {
+      "$ref": "#/$defs/SessionSendMessageCommand"
+    },
+    {
+      "$ref": "#/$defs/SessionGetHistoryCommand"
+    },
+    {
+      "$ref": "#/$defs/SessionCloseCommand"
+    },
+    {
+      "$ref": "#/$defs/PermissionRespondCommand"
+    },
+    {
+      "$ref": "#/$defs/SessionCompactCommand"
+    }
+  ]
+}

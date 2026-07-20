@@ -1,0 +1,4 @@
+[agent]
+description = "Reviews changes for bugs and regressions."
+system_prompt = "Review the change for correctness, regressions, and missing tests."
+allowed_tools = ["read_file", "list_dir"]

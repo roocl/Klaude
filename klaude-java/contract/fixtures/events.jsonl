@@ -1,0 +1,24 @@
+{"listen_addr":"127.0.0.1:7437","type":"core.started","version":"0.0.1"}
+{"goal":"检查 Unicode: 你好","run_id":"run-001","ts":"2026-07-18T12:00:00Z","type":"run.started"}
+{"reason":null,"run_id":"run-001","status":"success","steps":2,"ts":"2026-07-18T12:00:00Z","type":"run.finished"}
+{"run_id":"run-001","step":1,"ts":"2026-07-18T12:00:00Z","type":"step.started"}
+{"run_id":"run-001","step":1,"ts":"2026-07-18T12:00:00Z","type":"step.finished"}
+{"params":{"path":"文档.txt"},"run_id":"run-001","tool_name":"read_file","tool_use_id":"tool-001","ts":"2026-07-18T12:00:00Z","type":"tool.call_started"}
+{"elapsed_ms":12,"output":"内容","run_id":"run-001","tool_name":"read_file","tool_use_id":"tool-001","ts":"2026-07-18T12:00:00Z","type":"tool.call_finished"}
+{"attempt":1,"elapsed_ms":3,"error_class":"permission_denied","error_message":"denied","run_id":"run-001","tool_name":"write_file","tool_use_id":"tool-002","ts":"2026-07-18T12:00:00Z","type":"tool.call_failed"}
+{"run_id":"run-001","token":"你","ts":"2026-07-18T12:00:00Z","type":"llm.token"}
+{"cache_creation_input_tokens":2,"cache_read_input_tokens":5,"context_pct":0.25,"input_tokens":100,"output_tokens":20,"run_id":"run-001","ts":"2026-07-18T12:00:00Z","type":"llm.usage"}
+{"model":"scripted-model","run_id":"run-001","strategy":"static","ts":"2026-07-18T12:00:00Z","type":"llm.model_selected"}
+{"level":"INFO","message":"ready","run_id":"run-001","source":"contract","ts":"2026-07-18T12:00:00Z","type":"log.line"}
+{"mode":"chat","session_id":"session-001","ts":"2026-07-18T12:00:00Z","type":"session.created"}
+{"content":"你好","session_id":"session-001","ts":"2026-07-18T12:00:00Z","type":"session.message_received"}
+{"last_run_id":"run-001","session_id":"session-001","ts":"2026-07-18T12:00:00Z","type":"session.waiting_for_input"}
+{"session_id":"session-001","ts":"2026-07-18T12:00:00Z","type":"session.resumed"}
+{"session_id":"session-001","ts":"2026-07-18T12:00:00Z","type":"session.closed"}
+{"original_tokens":8000,"run_id":"run-001","session_id":"session-001","summary_tokens":800,"ts":"2026-07-18T12:00:00Z","type":"context.compacted"}
+{"param_preview":"path=文档.txt","params":{"path":"文档.txt"},"run_id":"run-001","session_id":"session-001","tool_name":"write_file","tool_use_id":"tool-002","ts":"2026-07-18T12:00:00Z","type":"permission.requested"}
+{"decision":"allow_once","run_id":"run-001","tool_use_id":"tool-002","ts":"2026-07-18T12:00:00Z","type":"permission.granted"}
+{"decision":"deny_once","run_id":"run-001","tool_use_id":"tool-003","ts":"2026-07-18T12:00:00Z","type":"permission.denied"}
+{"description":"review","parent_run_id":"run-001","run_id":"run-child","ts":"2026-07-18T12:00:00Z","type":"subagent.started"}
+{"parent_run_id":"run-001","run_id":"run-child","status":"success","ts":"2026-07-18T12:00:00Z","type":"subagent.finished"}
+{"arguments":"src","run_id":"run-001","skill_name":"review","ts":"2026-07-18T12:00:00Z","type":"skill.invoked"}

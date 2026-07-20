@@ -1,0 +1,1 @@
+{"client_id":"client-001","data":{"method":"core.ping","params":{"client":"客户端"}},"direction":"CLIENT→CORE","kind":"command","layer":"ipc","run_id":null,"step":null,"ts":"2026-07-18T12:00:00Z"}

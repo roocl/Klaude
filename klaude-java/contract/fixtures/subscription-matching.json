@@ -1,0 +1,88 @@
+[
+  {
+    "event_type": "run.started",
+    "kind": "topic",
+    "matches": true,
+    "name": "star_matches_suffix",
+    "platform": "Windows",
+    "topics": [
+      "run.*"
+    ]
+  },
+  {
+    "event_type": "tool.call_started",
+    "kind": "topic",
+    "matches": false,
+    "name": "star_rejects_other_prefix",
+    "platform": "Windows",
+    "topics": [
+      "run.*"
+    ]
+  },
+  {
+    "event_type": "tool.call_started",
+    "kind": "topic",
+    "matches": true,
+    "name": "question_matches_one_character",
+    "platform": "Windows",
+    "topics": [
+      "tool.?all_started"
+    ]
+  },
+  {
+    "event_type": "step.started",
+    "kind": "topic",
+    "matches": true,
+    "name": "character_class_matches",
+    "platform": "Windows",
+    "topics": [
+      "step.[st]tarted"
+    ]
+  },
+  {
+    "event_type": "Run.Started",
+    "kind": "topic",
+    "matches": true,
+    "name": "case_variant_follows_platform_normcase",
+    "platform": "Windows",
+    "topics": [
+      "run.*"
+    ]
+  },
+  {
+    "event_type": "run.started",
+    "kind": "topic",
+    "matches": false,
+    "name": "empty_topics_rejects",
+    "platform": "Windows",
+    "topics": []
+  },
+  {
+    "kind": "scope",
+    "matches": true,
+    "name": "global_accepts_any_run",
+    "run_id": "run-001",
+    "scope": "global"
+  },
+  {
+    "kind": "scope",
+    "matches": true,
+    "name": "run_scope_accepts_same_run",
+    "run_id": "run-001",
+    "scope": "run:run-001"
+  },
+  {
+    "kind": "scope",
+    "matches": false,
+    "name": "run_scope_rejects_other_run",
+    "run_id": "run-002",
+    "scope": "run:run-001"
+  },
+  {
+    "kind": "scope",
+    "matches": false,
+    "name": "invalid_scope_rejects",
+    "run_id": "run-001",
+    "scope": "session:session-001"
+  }
+]

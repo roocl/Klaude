@@ -1,0 +1,20 @@
+[versions]
+assertj = "3.27.3"
+jackson = "2.18.3"
+junit = "5.12.1"
+dotenv = "3.2.0"
+tomlj = "1.1.1"
+netty = "4.1.118.Final"
+json-schema-validator = "1.5.6"
+
+[libraries]
+assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
+jackson-annotations = { module = "com.fasterxml.jackson.core:jackson-annotations", version.ref = "jackson" }
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
+jackson-dataformat-yaml = { module = "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml", version.ref = "jackson" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+dotenv-java = { module = "io.github.cdimascio:dotenv-java", version.ref = "dotenv" }
+tomlj = { module = "org.tomlj:tomlj", version.ref = "tomlj" }
+netty-all = { module = "io.netty:netty-all", version.ref = "netty" }
+json-schema-validator = { module = "com.networknt:json-schema-validator", version.ref = "json-schema-validator" }

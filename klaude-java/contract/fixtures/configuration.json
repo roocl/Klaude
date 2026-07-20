@@ -1,0 +1,111 @@
+[
+  {
+    "name": "defaults",
+    "result": {
+      "agent": {
+        "max_steps": 20
+      },
+      "compaction": {
+        "auto_threshold": 0.0,
+        "tool_result_keep": 4000,
+        "tool_result_limit": 8000
+      },
+      "host": "127.0.0.1",
+      "llm": {
+        "default_model": "claude-sonnet-4-6",
+        "router": "static"
+      },
+      "logging": {
+        "file": "~/.kama/logs/core.log",
+        "format": "text",
+        "level": "INFO"
+      },
+      "mcp": {
+        "servers": []
+      },
+      "permission": {
+        "timeout_s": 60.0
+      },
+      "port": 7437,
+      "trace": {
+        "enabled": true,
+        "file": "~/.kama/traces/daemon.jsonl",
+        "include_llm_payload": true
+      }
+    }
+  },
+  {
+    "name": "toml_override",
+    "result": {
+      "agent": {
+        "max_steps": 20
+      },
+      "compaction": {
+        "auto_threshold": 0.0,
+        "tool_result_keep": 4000,
+        "tool_result_limit": 8000
+      },
+      "host": "127.0.0.1",
+      "llm": {
+        "default_model": "claude-sonnet-4-6",
+        "router": "static"
+      },
+      "logging": {
+        "file": "~/.kama/logs/core.log",
+        "format": "text",
+        "level": "INFO"
+      },
+      "mcp": {
+        "servers": []
+      },
+      "permission": {
+        "timeout_s": 60.0
+      },
+      "port": 6100,
+      "trace": {
+        "enabled": true,
+        "file": "~/.kama/traces/daemon.jsonl",
+        "include_llm_payload": true
+      }
+    }
+  },
+  {
+    "name": "environment_overrides_toml",
+    "result": {
+      "agent": {
+        "max_steps": 20
+      },
+      "compaction": {
+        "auto_threshold": 0.0,
+        "tool_result_keep": 4000,
+        "tool_result_limit": 8000
+      },
+      "host": "127.0.0.1",
+      "llm": {
+        "default_model": "claude-sonnet-4-6",
+        "router": "static"
+      },
+      "logging": {
+        "file": "~/.kama/logs/core.log",
+        "format": "text",
+        "level": "INFO"
+      },
+      "mcp": {
+        "servers": []
+      },
+      "permission": {
+        "timeout_s": 60.0
+      },
+      "port": 6200,
+      "trace": {
+        "enabled": true,
+        "file": "~/.kama/traces/daemon.jsonl",
+        "include_llm_payload": true
+      }
+    }
+  },
+  {
+    "error": "Unknown top-level config keys: unknown",
+    "name": "unknown_top_level_key"
+  }
+]

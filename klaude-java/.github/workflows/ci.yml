@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  java:
+    name: Java 21 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - name: Validate Unix launchers
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          sh -n scripts/start-core.sh
+          sh -n scripts/demo.sh
+          sh scripts/start-core.sh --print-command
+      - name: Test and package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\gradlew.bat --no-daemon test integrationTest distZip
+      - name: Test and package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./gradlew --no-daemon test integrationTest distZip
+      - name: Offline demo (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\demo.ps1
+      - name: Offline demo (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./scripts/demo.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: klaude-core-java-${{ matrix.os }}
+          path: build/distributions/*.zip
+          if-no-files-found: error

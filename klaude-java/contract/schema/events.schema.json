@@ -1,0 +1,947 @@
+{
+  "$defs": {
+    "ContextCompactedEvent": {
+      "properties": {
+        "original_tokens": {
+          "title": "Original Tokens",
+          "type": "integer"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "summary_tokens": {
+          "title": "Summary Tokens",
+          "type": "integer"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "context.compacted",
+          "default": "context.compacted",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "run_id",
+        "original_tokens",
+        "summary_tokens",
+        "ts"
+      ],
+      "title": "ContextCompactedEvent",
+      "type": "object"
+    },
+    "CoreStartedEvent": {
+      "properties": {
+        "listen_addr": {
+          "title": "Listen Addr",
+          "type": "string"
+        },
+        "type": {
+          "const": "core.started",
+          "default": "core.started",
+          "title": "Type",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "listen_addr",
+        "version"
+      ],
+      "title": "CoreStartedEvent",
+      "type": "object"
+    },
+    "LlmModelSelectedEvent": {
+      "properties": {
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "strategy": {
+          "title": "Strategy",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "llm.model_selected",
+          "default": "llm.model_selected",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "model",
+        "strategy",
+        "ts"
+      ],
+      "title": "LlmModelSelectedEvent",
+      "type": "object"
+    },
+    "LlmTokenEvent": {
+      "properties": {
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "token": {
+          "title": "Token",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "llm.token",
+          "default": "llm.token",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "token",
+        "ts"
+      ],
+      "title": "LlmTokenEvent",
+      "type": "object"
+    },
+    "LlmUsageEvent": {
+      "properties": {
+        "cache_creation_input_tokens": {
+          "title": "Cache Creation Input Tokens",
+          "type": "integer"
+        },
+        "cache_read_input_tokens": {
+          "title": "Cache Read Input Tokens",
+          "type": "integer"
+        },
+        "context_pct": {
+          "default": 0.0,
+          "title": "Context Pct",
+          "type": "number"
+        },
+        "input_tokens": {
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "llm.usage",
+          "default": "llm.usage",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "ts"
+      ],
+      "title": "LlmUsageEvent",
+      "type": "object"
+    },
+    "LogLineEvent": {
+      "properties": {
+        "level": {
+          "title": "Level",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "log.line",
+          "default": "log.line",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "level",
+        "source",
+        "message",
+        "ts"
+      ],
+      "title": "LogLineEvent",
+      "type": "object"
+    },
+    "PermissionDeniedEvent": {
+      "properties": {
+        "decision": {
+          "title": "Decision",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "tool_use_id": {
+          "title": "Tool Use Id",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "permission.denied",
+          "default": "permission.denied",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "tool_use_id",
+        "decision",
+        "ts"
+      ],
+      "title": "PermissionDeniedEvent",
+      "type": "object"
+    },
+    "PermissionGrantedEvent": {
+      "properties": {
+        "decision": {
+          "title": "Decision",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "tool_use_id": {
+          "title": "Tool Use Id",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "permission.granted",
+          "default": "permission.granted",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "tool_use_id",
+        "decision",
+        "ts"
+      ],
+      "title": "PermissionGrantedEvent",
+      "type": "object"
+    },
+    "PermissionRequestedEvent": {
+      "properties": {
+        "param_preview": {
+          "title": "Param Preview",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "tool_name": {
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "tool_use_id": {
+          "title": "Tool Use Id",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "permission.requested",
+          "default": "permission.requested",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "tool_use_id",
+        "tool_name",
+        "params",
+        "param_preview",
+        "session_id",
+        "ts"
+      ],
+      "title": "PermissionRequestedEvent",
+      "type": "object"
+    },
+    "RunFinishedEvent": {
+      "properties": {
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "steps": {
+          "title": "Steps",
+          "type": "integer"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "run.finished",
+          "default": "run.finished",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "status",
+        "steps",
+        "ts"
+      ],
+      "title": "RunFinishedEvent",
+      "type": "object"
+    },
+    "RunStartedEvent": {
+      "properties": {
+        "goal": {
+          "title": "Goal",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "run.started",
+          "default": "run.started",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "goal",
+        "ts"
+      ],
+      "title": "RunStartedEvent",
+      "type": "object"
+    },
+    "SessionClosedEvent": {
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "session.closed",
+          "default": "session.closed",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "ts"
+      ],
+      "title": "SessionClosedEvent",
+      "type": "object"
+    },
+    "SessionCreatedEvent": {
+      "properties": {
+        "mode": {
+          "title": "Mode",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "session.created",
+          "default": "session.created",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "mode",
+        "ts"
+      ],
+      "title": "SessionCreatedEvent",
+      "type": "object"
+    },
+    "SessionMessageReceivedEvent": {
+      "properties": {
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "session.message_received",
+          "default": "session.message_received",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "content",
+        "ts"
+      ],
+      "title": "SessionMessageReceivedEvent",
+      "type": "object"
+    },
+    "SessionResumedEvent": {
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "session.resumed",
+          "default": "session.resumed",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "ts"
+      ],
+      "title": "SessionResumedEvent",
+      "type": "object"
+    },
+    "SessionWaitingForInputEvent": {
+      "properties": {
+        "last_run_id": {
+          "title": "Last Run Id",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "session.waiting_for_input",
+          "default": "session.waiting_for_input",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "last_run_id",
+        "ts"
+      ],
+      "title": "SessionWaitingForInputEvent",
+      "type": "object"
+    },
+    "SkillInvokedEvent": {
+      "properties": {
+        "arguments": {
+          "title": "Arguments",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "skill_name": {
+          "title": "Skill Name",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "skill.invoked",
+          "default": "skill.invoked",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "skill_name",
+        "arguments",
+        "run_id",
+        "ts"
+      ],
+      "title": "SkillInvokedEvent",
+      "type": "object"
+    },
+    "StepFinishedEvent": {
+      "properties": {
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "step": {
+          "title": "Step",
+          "type": "integer"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "step.finished",
+          "default": "step.finished",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "step",
+        "ts"
+      ],
+      "title": "StepFinishedEvent",
+      "type": "object"
+    },
+    "StepStartedEvent": {
+      "properties": {
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "step": {
+          "title": "Step",
+          "type": "integer"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "step.started",
+          "default": "step.started",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "step",
+        "ts"
+      ],
+      "title": "StepStartedEvent",
+      "type": "object"
+    },
+    "SubagentFinishedEvent": {
+      "properties": {
+        "parent_run_id": {
+          "title": "Parent Run Id",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "subagent.finished",
+          "default": "subagent.finished",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "parent_run_id",
+        "status",
+        "ts"
+      ],
+      "title": "SubagentFinishedEvent",
+      "type": "object"
+    },
+    "SubagentStartedEvent": {
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "parent_run_id": {
+          "title": "Parent Run Id",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "subagent.started",
+          "default": "subagent.started",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "parent_run_id",
+        "description",
+        "ts"
+      ],
+      "title": "SubagentStartedEvent",
+      "type": "object"
+    },
+    "ToolCallFailedEvent": {
+      "properties": {
+        "attempt": {
+          "default": 1,
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "elapsed_ms": {
+          "title": "Elapsed Ms",
+          "type": "integer"
+        },
+        "error_class": {
+          "title": "Error Class",
+          "type": "string"
+        },
+        "error_message": {
+          "title": "Error Message",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "tool_name": {
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "tool_use_id": {
+          "title": "Tool Use Id",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "tool.call_failed",
+          "default": "tool.call_failed",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "tool_use_id",
+        "tool_name",
+        "error_class",
+        "error_message",
+        "elapsed_ms",
+        "ts"
+      ],
+      "title": "ToolCallFailedEvent",
+      "type": "object"
+    },
+    "ToolCallFinishedEvent": {
+      "properties": {
+        "elapsed_ms": {
+          "title": "Elapsed Ms",
+          "type": "integer"
+        },
+        "output": {
+          "default": "",
+          "title": "Output",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "tool_name": {
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "tool_use_id": {
+          "title": "Tool Use Id",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "tool.call_finished",
+          "default": "tool.call_finished",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "tool_use_id",
+        "tool_name",
+        "elapsed_ms",
+        "ts"
+      ],
+      "title": "ToolCallFinishedEvent",
+      "type": "object"
+    },
+    "ToolCallStartedEvent": {
+      "properties": {
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "tool_name": {
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "tool_use_id": {
+          "title": "Tool Use Id",
+          "type": "string"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "type": {
+          "const": "tool.call_started",
+          "default": "tool.call_started",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "tool_use_id",
+        "tool_name",
+        "params",
+        "ts"
+      ],
+      "title": "ToolCallStartedEvent",
+      "type": "object"
+    }
+  },
+  "discriminator": {
+    "mapping": {
+      "context.compacted": "#/$defs/ContextCompactedEvent",
+      "core.started": "#/$defs/CoreStartedEvent",
+      "llm.model_selected": "#/$defs/LlmModelSelectedEvent",
+      "llm.token": "#/$defs/LlmTokenEvent",
+      "llm.usage": "#/$defs/LlmUsageEvent",
+      "log.line": "#/$defs/LogLineEvent",
+      "permission.denied": "#/$defs/PermissionDeniedEvent",
+      "permission.granted": "#/$defs/PermissionGrantedEvent",
+      "permission.requested": "#/$defs/PermissionRequestedEvent",
+      "run.finished": "#/$defs/RunFinishedEvent",
+      "run.started": "#/$defs/RunStartedEvent",
+      "session.closed": "#/$defs/SessionClosedEvent",
+      "session.created": "#/$defs/SessionCreatedEvent",
+      "session.message_received": "#/$defs/SessionMessageReceivedEvent",
+      "session.resumed": "#/$defs/SessionResumedEvent",
+      "session.waiting_for_input": "#/$defs/SessionWaitingForInputEvent",
+      "skill.invoked": "#/$defs/SkillInvokedEvent",
+      "step.finished": "#/$defs/StepFinishedEvent",
+      "step.started": "#/$defs/StepStartedEvent",
+      "subagent.finished": "#/$defs/SubagentFinishedEvent",
+      "subagent.started": "#/$defs/SubagentStartedEvent",
+      "tool.call_failed": "#/$defs/ToolCallFailedEvent",
+      "tool.call_finished": "#/$defs/ToolCallFinishedEvent",
+      "tool.call_started": "#/$defs/ToolCallStartedEvent"
+    },
+    "propertyName": "type"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/CoreStartedEvent"
+    },
+    {
+      "$ref": "#/$defs/RunStartedEvent"
+    },
+    {
+      "$ref": "#/$defs/RunFinishedEvent"
+    },
+    {
+      "$ref": "#/$defs/StepStartedEvent"
+    },
+    {
+      "$ref": "#/$defs/StepFinishedEvent"
+    },
+    {
+      "$ref": "#/$defs/ToolCallStartedEvent"
+    },
+    {
+      "$ref": "#/$defs/ToolCallFinishedEvent"
+    },
+    {
+      "$ref": "#/$defs/ToolCallFailedEvent"
+    },
+    {
+      "$ref": "#/$defs/LlmTokenEvent"
+    },
+    {
+      "$ref": "#/$defs/LlmUsageEvent"
+    },
+    {
+      "$ref": "#/$defs/LlmModelSelectedEvent"
+    },
+    {
+      "$ref": "#/$defs/LogLineEvent"
+    },
+    {
+      "$ref": "#/$defs/SessionCreatedEvent"
+    },
+    {
+      "$ref": "#/$defs/SessionMessageReceivedEvent"
+    },
+    {
+      "$ref": "#/$defs/SessionWaitingForInputEvent"
+    },
+    {
+      "$ref": "#/$defs/SessionResumedEvent"
+    },
+    {
+      "$ref": "#/$defs/SessionClosedEvent"
+    },
+    {
+      "$ref": "#/$defs/ContextCompactedEvent"
+    },
+    {
+      "$ref": "#/$defs/PermissionRequestedEvent"
+    },
+    {
+      "$ref": "#/$defs/PermissionGrantedEvent"
+    },
+    {
+      "$ref": "#/$defs/PermissionDeniedEvent"
+    },
+    {
+      "$ref": "#/$defs/SubagentStartedEvent"
+    },
+    {
+      "$ref": "#/$defs/SubagentFinishedEvent"
+    },
+    {
+      "$ref": "#/$defs/SkillInvokedEvent"
+    }
+  ]
+}

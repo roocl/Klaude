@@ -1,0 +1,10 @@
+[
+  {
+    "content": "Summary of the conversation",
+    "role": "user"
+  },
+  {
+    "content": "Understood",
+    "role": "assistant"
+  }
+]

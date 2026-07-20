@@ -1,0 +1,7 @@
+{"expected":{"error":{"code":-32700,"data":null,"message":"Parse error"},"id":null,"jsonrpc":"2.0"},"input_line":"{not-json","name":"malformed_json"}
+{"expected":{"error":{"code":-32600,"data":"<validation-error>","message":"Invalid Request"},"id":null,"jsonrpc":"2.0"},"input":{"jsonrpc":"2.0","method":"core.ping"},"name":"invalid_request"}
+{"expected":{"error":{"code":-32601,"data":null,"message":"Method not found: core.missing"},"id":"request-missing","jsonrpc":"2.0"},"input":{"id":"request-missing","jsonrpc":"2.0","method":"core.missing","params":{}},"name":"method_not_found"}
+{"expected":{"error":{"code":-32600,"data":"<validation-error>","message":"Invalid params"},"id":"request-invalid-params","jsonrpc":"2.0"},"input":{"id":"request-invalid-params","jsonrpc":"2.0","method":"session.create","params":{"mode":"invalid","type":"session.create"}},"name":"invalid_params"}
+{"expected":{"error":{"code":-32603,"data":null,"message":"Internal error"},"id":"request-handler","jsonrpc":"2.0"},"input":{"handler_raises":"unexpected exception"},"name":"handler_error"}
+{"expected":{"error":{"code":-32600,"data":null,"message":"Request too large"},"id":null,"jsonrpc":"2.0"},"input":{"line_bytes":67108865},"name":"oversized_line"}
+{"expected":{"error":{"code":-32600,"data":"<validation-error>","message":"Invalid params"},"id":"request-mismatch","jsonrpc":"2.0"},"input":{"id":"request-mismatch","jsonrpc":"2.0","method":"session.create","params":{"session_id":"session-001","type":"session.close"}},"name":"method_type_mismatch"}

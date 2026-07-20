@@ -1,0 +1,9 @@
+{"client":"contract-client/1.0","type":"core.ping"}
+{"goal":"检查 Unicode: 你好","type":"agent.run"}
+{"replay_from_run":null,"scope":"global","topics":["run.*","tool.?all_started"],"type":"event.subscribe"}
+{"mode":"chat","title":"契约会话","type":"session.create"}
+{"content":"你好","session_id":"session-001","type":"session.send_message"}
+{"session_id":"session-001","type":"session.get_history"}
+{"session_id":"session-001","type":"session.close"}
+{"decision":"allow_once","tool_use_id":"tool-001","type":"permission.respond"}
+{"focus":"保留决策","session_id":"session-001","type":"session.compact"}

@@ -1,0 +1,21 @@
+# Gradle
+.gradle/
+build/
+out/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+
+# Local runtime configuration and data
+.env
+.env.*
+!.env.example
+.klaude/
+
+# Logs and JVM crash files
+*.log
+hs_err_pid*
+replay_pid*
+
+.scratch/

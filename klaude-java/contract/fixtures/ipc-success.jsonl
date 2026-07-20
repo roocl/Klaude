@@ -1,0 +1,4 @@
+{"expected":{"id":"request-default","jsonrpc":"2.0","method":"core.ping","params":{}},"input":{"id":"request-default","jsonrpc":"2.0","method":"core.ping"},"name":"default_params"}
+{"expected":{"id":"response-null","jsonrpc":"2.0","result":null},"input":{"id":"response-null","result":null},"name":"explicit_null_result"}
+{"expected":{"id":"请求-一","jsonrpc":"2.0","method":"session.send_message","params":{"content":"你好，世界","session_id":"会话-一"}},"input":{"id":"请求-一","jsonrpc":"2.0","method":"session.send_message","params":{"content":"你好，世界","session_id":"会话-一"}},"name":"unicode"}
+{"expected":{"id":"request-unknown","jsonrpc":"2.0","method":"core.ping","params":{"client":"contract-client"}},"input":{"future_field":"ignored","id":"request-unknown","jsonrpc":"2.0","method":"core.ping","params":{"client":"contract-client"}},"name":"unknown_request_field"}

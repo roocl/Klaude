@@ -1,0 +1,2 @@
+{"ts": "2026-07-18T12:00:00Z", "role": "user", "content": "balanced prefix", "run_id": "run-002"}
+{"ts": "2026-07-18T12:00:00Z", "role": "assistant", "content": [{"type": "tool_use", "id": "tool-orphan", "name": "read_file", "input": {}}], "run_id": "run-002"}

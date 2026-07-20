@@ -1,0 +1,4 @@
+[agent]
+description = "Executes a bounded implementation task."
+system_prompt = "Implement only the requested task and verify it with focused tests."
+allowed_tools = ["read_file", "list_dir", "write_file", "bash"]
