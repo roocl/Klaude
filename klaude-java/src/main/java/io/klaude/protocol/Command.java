@@ -13,7 +13,10 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
         @JsonSubTypes.Type(value = SessionGetHistoryCommand.class, name = "session.get_history"),
         @JsonSubTypes.Type(value = SessionCloseCommand.class, name = "session.close"),
         @JsonSubTypes.Type(value = PermissionRespondCommand.class, name = "permission.respond"),
-        @JsonSubTypes.Type(value = SessionCompactCommand.class, name = "session.compact")
+        @JsonSubTypes.Type(value = SessionCompactCommand.class, name = "session.compact"),
+        @JsonSubTypes.Type(value = SessionListCommand.class, name = "session.list"),
+        @JsonSubTypes.Type(value = SkillListCommand.class, name = "skill.list"),
+        @JsonSubTypes.Type(value = RunCancelCommand.class, name = "run.cancel")
 })
 public sealed interface Command permits
         PingCommand,
@@ -24,5 +27,8 @@ public sealed interface Command permits
         SessionGetHistoryCommand,
         SessionCloseCommand,
         PermissionRespondCommand,
-        SessionCompactCommand {
+        SessionCompactCommand,
+        SessionListCommand,
+        SkillListCommand,
+        RunCancelCommand {
 }

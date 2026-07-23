@@ -126,6 +126,15 @@ public final class SessionManager {
         }
     }
 
+    // 返回按最近更新时间排序的全部 session metadata
+    public CompletionStage<List<Session>> listSessions() {
+        try {
+            return CompletableFuture.completedFuture(store.listMeta());
+        } catch (Throwable error) {
+            return CompletableFuture.failedFuture(error);
+        }
+    }
+
     // 持久化一轮 user/assistant 消息并完成 session 状态转换
     public CompletionStage<String> sendMessage(String sessionId, String content) {
         java.util.Objects.requireNonNull(sessionId, "sessionId");

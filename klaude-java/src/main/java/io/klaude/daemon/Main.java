@@ -54,15 +54,17 @@ public final class Main {
     public static void main(String[] args) throws Exception {
         Path cwd = Path.of("").toAbsolutePath().normalize();
         Path home = Path.of(System.getProperty("user.home")).toAbsolutePath().normalize();
-        var config = new ConfigLoader().load(cwd, home, System.getenv());
+        var configLoader = new ConfigLoader();
+        Map<String, String> environment = configLoader.resolveEnvironment(cwd, System.getenv());
+        var config = configLoader.load(cwd, home, environment);
         Clock clock = Clock.systemUTC();
         CountDownLatch shutdown = new CountDownLatch(1);
         AtomicReference<KlaudeDaemon> daemonReference = new AtomicReference<>();
         Path runsRoot = cwd.resolve("runs");
         Duration permissionTimeout = Duration.ofMillis(
                 Math.round(config.permission().timeoutSeconds() * 1_000));
-        String apiKey = System.getenv().getOrDefault("ANTHROPIC_API_KEY", "");
-        URI endpoint = URI.create(System.getenv().getOrDefault(
+        String apiKey = environment.getOrDefault("ANTHROPIC_API_KEY", "");
+        URI endpoint = URI.create(environment.getOrDefault(
                 "ANTHROPIC_BASE_URL", "https://api.anthropic.com"));
         try (DaemonExtensionRuntime extensions = DaemonExtensionRuntime.production(
                      cwd, home, new io.klaude.mcp.DefaultMcpConnector());
@@ -121,7 +123,14 @@ public final class Main {
                                  permissions,
                                  extensions,
                                  daemonReference,
-                                 clock));
+                                 clock),
+                         runId -> daemonReference.get().publish(
+                                 new io.klaude.protocol.RunFinishedEvent(
+                                         runId,
+                                         "failed",
+                                         "cancelled",
+                                         0,
+                                         java.time.Instant.now(clock).toString())));
              KlaudeDaemon daemon = new KlaudeDaemon(
                      config.host(),
                      config.port(),
@@ -131,7 +140,9 @@ public final class Main {
                      () -> UUID.randomUUID().toString().replace("-", ""),
                      permissions,
                      runs,
-                     sessionManager)) {
+                     sessionManager,
+                     extensions::listSkills,
+                     runs::cancel)) {
                 daemonReference.set(daemon);
                 Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().unstarted(() -> {
                     daemon.close();

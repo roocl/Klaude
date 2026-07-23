@@ -216,7 +216,9 @@ final class AgentLoopTest {
         assertThat(context.status()).isEqualTo("failed");
         assertThat(context.reason()).isEqualTo("llm_error");
         assertThat(events).extracting(event -> event.getClass().getSimpleName())
-                .containsExactly("StepStartedEvent");
+                .containsExactly("StepStartedEvent", "LogLineEvent");
+        assertThat(((io.klaude.protocol.LogLineEvent) events.getLast()).message())
+                .isEqualTo("provider unavailable");
     }
 
     // 功能：验证 provider 取消先标记 context 再向上传播取消信号

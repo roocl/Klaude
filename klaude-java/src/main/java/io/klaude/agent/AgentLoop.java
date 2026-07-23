@@ -10,6 +10,7 @@ import io.klaude.llm.LlmToolCall;
 import io.klaude.protocol.ProtocolJson;
 import io.klaude.protocol.StepFinishedEvent;
 import io.klaude.protocol.StepStartedEvent;
+import io.klaude.protocol.LogLineEvent;
 import io.klaude.tool.ToolRegistry;
 import java.time.Clock;
 import java.time.Instant;
@@ -96,13 +97,27 @@ public final class AgentLoop {
                             return CompletableFuture.failedFuture(error);
                         }
                         context.markFailed("llm_error");
-                        return CompletableFuture.completedFuture(null);
+                        return events.publish(new LogLineEvent(
+                                context.runId(),
+                                "ERROR",
+                                "llm",
+                                errorMessage(error),
+                                Instant.now(clock).toString()));
                     }
                     return handleResponse(context, step, outcome.response());
                 })
                 .thenCompose(ignored -> context.isDone()
                         ? CompletableFuture.completedFuture(null)
                         : runStep(context));
+    }
+
+    // 将 provider 异常压缩为有界且单行的诊断消息
+    private static String errorMessage(Throwable error) {
+        String message = error.getMessage() == null
+                ? error.getClass().getSimpleName()
+                : error.getMessage();
+        String singleLine = message.replace('\r', ' ').replace('\n', ' ');
+        return singleLine.length() <= 500 ? singleLine : singleLine.substring(0, 500) + "...";
     }
 
     // 将 provider 的同步或异步结果隔离为可分类 outcome

@@ -52,7 +52,7 @@ final class HttpAnthropicStreamClientTest {
 
                 """;
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/v1/messages", exchange -> {
+        server.createContext("/anthropic/v1/messages", exchange -> {
             requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             byte[] body = sse.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
@@ -63,7 +63,8 @@ final class HttpAnthropicStreamClientTest {
         server.start();
         var tokens = new CopyOnWriteArrayList<String>();
         try (var client = new HttpAnthropicStreamClient(
-                URI.create("http://127.0.0.1:" + server.getAddress().getPort()), "test-key")) {
+                URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/anthropic"),
+                "test-key")) {
             var message = ProtocolJson.mapper().createObjectNode()
                     .put("role", "user")
                     .put("content", "read");

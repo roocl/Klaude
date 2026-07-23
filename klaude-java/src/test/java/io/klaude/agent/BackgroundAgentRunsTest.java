@@ -30,4 +30,31 @@ final class BackgroundAgentRunsTest {
         assertThat(pending).isCancelled();
         assertThat(runs.activeCount()).isZero();
     }
+
+    // 功能：按 run ID 取消单个活跃任务
+    // 设计：启动永久 pending execution，调用 cancel 后验证 future 与 registry 状态
+    @Test
+    void cancelsOneActiveRunById() throws Exception {
+        var pending = new CompletableFuture<RunOutcome>();
+        var executionStarted = new CountDownLatch(1);
+        var cancelledRun = new java.util.concurrent.atomic.AtomicReference<String>();
+        try (var runs = new BackgroundAgentRuns(
+                () -> "run-fixed",
+                (runId, goal) -> {
+                    executionStarted.countDown();
+                    return pending;
+                },
+                cancelledRun::set)) {
+            runs.apply("goal");
+            assertThat(executionStarted.await(1, TimeUnit.SECONDS)).isTrue();
+
+            assertThat(runs.cancel("run-fixed")).isTrue();
+            for (int attempt = 0; attempt < 50 && !pending.isCancelled(); attempt++) {
+                Thread.sleep(10);
+            }
+            assertThat(pending).isCancelled();
+            assertThat(cancelledRun.get()).isEqualTo("run-fixed");
+            assertThat(runs.cancel("missing")).isFalse();
+        }
+    }
 }

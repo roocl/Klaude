@@ -30,6 +30,8 @@ final class InstalledDistributionTest {
         Path distribution = Path.of(System.getProperty("klaude.distribution"));
         Path launcher = distribution.resolve("bin/klaude-core-java.bat");
         verifyInstalledDistribution(launcher, temp);
+        assertThat(distribution.resolve("bin/klaude.bat")).isRegularFile();
+        assertThat(distribution.resolve("bin/klaude-tui.bat")).isRegularFile();
     }
 
     // 功能：验证安装后的 Unix 发行包可从任意工作目录启动并响应 ping
@@ -41,6 +43,8 @@ final class InstalledDistributionTest {
         Path distribution = Path.of(System.getProperty("klaude.distribution"));
         Path launcher = distribution.resolve("bin/klaude-core-java");
         verifyInstalledDistribution(launcher, temp);
+        assertThat(distribution.resolve("bin/klaude")).isRegularFile();
+        assertThat(distribution.resolve("bin/klaude-tui")).isRegularFile();
     }
 
     // 启动指定平台 launcher 并验证正式 JSON-RPC ping 与 listener 回收
@@ -54,6 +58,7 @@ final class InstalledDistributionTest {
         builder.directory(workspace.toFile());
         builder.redirectErrorStream(true);
         builder.environment().put("JAVA_HOME", System.getProperty("java.home"));
+        builder.environment().put("KLAUDE_JAVA_HOME", System.getProperty("java.home"));
         builder.environment().put("JAVA_OPTS", "-Duser.home=" + home);
         builder.environment().put("KLAUDE_PORT", "0");
         Process process = builder.start();
@@ -80,10 +85,117 @@ final class InstalledDistributionTest {
                         .withFailMessage("unexpected ping response: %s", reply)
                         .isEqualTo("0.1.0");
             }
+            verifyCliPing(launcher, workspace, home, port);
+            verifyCliSkillDiscovery(launcher, workspace, home, port);
+            verifyTuiSkillDiscovery(launcher, workspace, home, port);
+            verifyCliTrace(launcher, workspace, home);
         } finally {
             terminate(process);
         }
         assertThat(awaitListenerClosed(port, Duration.ofSeconds(5))).isTrue();
+    }
+
+    // 从安装目录执行独立 CLI 进程并验证真实 daemon ping
+    private static void verifyCliPing(
+            Path daemonLauncher, Path workspace, Path home, int port) throws Exception {
+        String cliName = daemonLauncher.getFileName().toString().endsWith(".bat")
+                ? "klaude.bat"
+                : "klaude";
+        Path cli = daemonLauncher.resolveSibling(cliName);
+        assertThat(cli).isRegularFile();
+        ProcessBuilder builder = cliName.endsWith(".bat")
+                ? new ProcessBuilder("cmd", "/c", cli.toString(), "ping")
+                : new ProcessBuilder(cli.toString(), "ping");
+        builder.directory(workspace.toFile());
+        builder.redirectErrorStream(true);
+        Files.writeString(
+                workspace.resolve(".env"),
+                "KLAUDE_JAVA_HOME=" + System.getProperty("java.home") + "\n",
+                StandardCharsets.UTF_8);
+        builder.environment().put("JAVA_HOME", workspace.resolve("invalid-java").toString());
+        builder.environment().remove("KLAUDE_JAVA_HOME");
+        builder.environment().put("JAVA_OPTS", "-Duser.home=" + home);
+        builder.environment().put("KLAUDE_PORT", Integer.toString(port));
+        Process process = builder.start();
+        assertThat(process.waitFor(10, TimeUnit.SECONDS)).isTrue();
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        assertThat(process.exitValue()).withFailMessage(output).isZero();
+        assertThat(output).contains("pong server=0.1.0 uptime=");
+    }
+
+    // 通过安装包 chat 输入列出生产内置 skills 并退出
+    private static void verifyCliSkillDiscovery(
+            Path daemonLauncher, Path workspace, Path home, int port) throws Exception {
+        String cliName = daemonLauncher.getFileName().toString().endsWith(".bat")
+                ? "klaude.bat"
+                : "klaude";
+        Path cli = daemonLauncher.resolveSibling(cliName);
+        ProcessBuilder builder = cliName.endsWith(".bat")
+                ? new ProcessBuilder("cmd", "/c", cli.toString(), "chat")
+                : new ProcessBuilder(cli.toString(), "chat");
+        builder.directory(workspace.toFile());
+        builder.redirectErrorStream(true);
+        builder.environment().put("JAVA_HOME", System.getProperty("java.home"));
+        builder.environment().put("JAVA_OPTS", "-Duser.home=" + home);
+        builder.environment().put("KLAUDE_PORT", Integer.toString(port));
+        Process process = builder.start();
+        try (var input = new OutputStreamWriter(
+                process.getOutputStream(), StandardCharsets.UTF_8)) {
+            input.write("/skills\n/exit\n");
+        }
+        assertThat(process.waitFor(10, TimeUnit.SECONDS)).isTrue();
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        assertThat(process.exitValue()).withFailMessage(output).isZero();
+        assertThat(output).contains("Klaude chat", "/init  ");
+    }
+
+    // 使用安装包 CLI 读取 daemon 已写入的 IPC trace
+    private static void verifyCliTrace(
+            Path daemonLauncher, Path workspace, Path home) throws Exception {
+        String cliName = daemonLauncher.getFileName().toString().endsWith(".bat")
+                ? "klaude.bat"
+                : "klaude";
+        Path cli = daemonLauncher.resolveSibling(cliName);
+        ProcessBuilder builder = cliName.endsWith(".bat")
+                ? new ProcessBuilder("cmd", "/c", cli.toString(), "trace")
+                : new ProcessBuilder(cli.toString(), "trace");
+        builder.directory(workspace.toFile());
+        builder.redirectErrorStream(true);
+        builder.environment().put("JAVA_HOME", System.getProperty("java.home"));
+        builder.environment().put("JAVA_OPTS", "-Duser.home=" + home);
+        Process process = builder.start();
+        assertThat(process.waitFor(10, TimeUnit.SECONDS)).isTrue();
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        assertThat(process.exitValue()).withFailMessage(output).isZero();
+        assertThat(output).contains("CLIENT->CORE", "core.ping");
+    }
+
+    // 通过安装包 TUI 创建真实 session、列出 skills 并正常退出
+    private static void verifyTuiSkillDiscovery(
+            Path daemonLauncher, Path workspace, Path home, int port) throws Exception {
+        String tuiName = daemonLauncher.getFileName().toString().endsWith(".bat")
+                ? "klaude-tui.bat"
+                : "klaude-tui";
+        Path tui = daemonLauncher.resolveSibling(tuiName);
+        ProcessBuilder builder = tuiName.endsWith(".bat")
+                ? new ProcessBuilder("cmd", "/c", tui.toString())
+                : new ProcessBuilder(tui.toString());
+        builder.directory(workspace.toFile());
+        builder.redirectErrorStream(true);
+        builder.environment().put("JAVA_HOME", System.getProperty("java.home"));
+        builder.environment().put("JAVA_OPTS", "-Duser.home=" + home);
+        builder.environment().put("KLAUDE_PORT", Integer.toString(port));
+        builder.environment().put("COLUMNS", "80");
+        builder.environment().put("LINES", "24");
+        Process process = builder.start();
+        try (var input = new OutputStreamWriter(
+                process.getOutputStream(), StandardCharsets.UTF_8)) {
+            input.write("/skills\n/exit\n");
+        }
+        assertThat(process.waitFor(10, TimeUnit.SECONDS)).isTrue();
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        assertThat(process.exitValue()).withFailMessage(output).isZero();
+        assertThat(output).contains("Klaude TUI | session", "/init  ");
     }
 
     // 忽略启动警告并等待 daemon 输出监听地址

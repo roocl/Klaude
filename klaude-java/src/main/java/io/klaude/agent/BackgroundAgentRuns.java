@@ -15,6 +15,7 @@ import java.util.function.Supplier;
 public final class BackgroundAgentRuns implements Function<String, String>, AutoCloseable {
     private final Supplier<String> runIds;
     private final BiFunction<String, String, CompletionStage<RunOutcome>> execution;
+    private final java.util.function.Consumer<String> cancellation;
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final ConcurrentHashMap<String, Future<?>> active = new ConcurrentHashMap<>();
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -23,8 +24,17 @@ public final class BackgroundAgentRuns implements Function<String, String>, Auto
     public BackgroundAgentRuns(
             Supplier<String> runIds,
             BiFunction<String, String, CompletionStage<RunOutcome>> execution) {
+        this(runIds, execution, ignored -> { });
+    }
+
+    // 初始化带可观察取消回调的后台执行边界
+    public BackgroundAgentRuns(
+            Supplier<String> runIds,
+            BiFunction<String, String, CompletionStage<RunOutcome>> execution,
+            java.util.function.Consumer<String> cancellation) {
         this.runIds = java.util.Objects.requireNonNull(runIds, "runIds");
         this.execution = java.util.Objects.requireNonNull(execution, "execution");
+        this.cancellation = java.util.Objects.requireNonNull(cancellation, "cancellation");
     }
 
     // 后台启动 run 并立即返回新 ID
@@ -64,6 +74,17 @@ public final class BackgroundAgentRuns implements Function<String, String>, Auto
     // 返回当前活跃 run 数量
     public int activeCount() {
         return active.size();
+    }
+
+    // 取消一个活跃 run 并返回是否找到目标
+    public boolean cancel(String runId) {
+        java.util.Objects.requireNonNull(runId, "runId");
+        Future<?> task = active.get(runId);
+        boolean cancelled = task != null && task.cancel(true);
+        if (cancelled) {
+            cancellation.accept(runId);
+        }
+        return cancelled;
     }
 
     // 取消全部活跃 run 并关闭 virtual-thread executor

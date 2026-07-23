@@ -229,6 +229,25 @@ final class SessionStoreTest {
         assertThat(directory.resolve("thread.jsonl.tmp")).doesNotExist();
     }
 
+    // 功能：列出有效 session 并按更新时间倒序排列
+    // 设计：混合两份 metadata 和一个损坏目录，验证容错发现与稳定排序
+    @Test
+    void listsValidMetadataByRecentUpdate(@TempDir Path temp) throws Exception {
+        SessionStore store = new SessionStore(temp.resolve("sessions"), Clock.systemUTC());
+        store.writeMeta(new Session(
+                "older", io.klaude.protocol.SessionMode.CHAT,
+                io.klaude.protocol.SessionStatus.ACTIVE, "old",
+                "2026-07-19T00:00:00Z", "2026-07-19T00:00:00Z", List.of()));
+        store.writeMeta(new Session(
+                "newer", io.klaude.protocol.SessionMode.CHAT,
+                io.klaude.protocol.SessionStatus.WAITING_FOR_INPUT, "new",
+                "2026-07-20T00:00:00Z", "2026-07-20T00:00:00Z", List.of("run-1")));
+        Files.createDirectories(store.sessionDirectory("broken"));
+        Files.writeString(store.sessionDirectory("broken").resolve("meta.json"), "not-json");
+
+        assertThat(store.listMeta()).extracting(Session::id).containsExactly("newer", "older");
+    }
+
     // 将测试 classpath 中的 fixture 目录转换为文件系统路径
     private static Path fixturePath(String resource) throws Exception {
         URI uri = Objects.requireNonNull(SessionStoreTest.class.getResource(resource)).toURI();

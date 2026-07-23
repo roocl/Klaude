@@ -43,6 +43,26 @@ final class ConfigLoaderTest {
         assertThat(config.trace().file()).isEqualTo(home.resolve(".klaude/traces/daemon.jsonl"));
     }
 
+    // 功能：向 daemon 暴露 dotenv 与进程变量合并后的完整环境
+    // 设计：在 dotenv 写 API Key，再用进程 Map 覆盖并验证系统变量优先
+    @Test
+    void resolvesDotenvForRuntimeSecrets(@TempDir Path temp) throws Exception {
+        Path cwd = temp.resolve("project");
+        Files.createDirectories(cwd);
+        Files.writeString(
+                cwd.resolve(".env"),
+                "ANTHROPIC_API_KEY=from-dotenv\nKLAUDE_PORT=6200\n",
+                StandardCharsets.UTF_8);
+        var loader = new ConfigLoader();
+
+        Map<String, String> dotenv = loader.resolveEnvironment(cwd, Map.of());
+        Map<String, String> overridden = loader.resolveEnvironment(
+                cwd, Map.of("ANTHROPIC_API_KEY", "from-process"));
+
+        assertThat(dotenv).containsEntry("ANTHROPIC_API_KEY", "from-dotenv");
+        assertThat(overridden).containsEntry("ANTHROPIC_API_KEY", "from-process");
+    }
+
     // 功能：验证 dotenv 指定显式配置后只读取该 TOML，并相对 daemon cwd 解析路径
     // 设计：默认用户/项目 TOML 都写端口，显式文件只写 host，断言端口回到内建默认值
     @Test

@@ -19,17 +19,25 @@ public final class ConfigLoader {
         Path cwd = workingDirectory.toAbsolutePath().normalize();
         Path home = homeDirectory.toAbsolutePath().normalize();
         MutableConfig config = MutableConfig.defaults(home);
-        Map<String, String> dotenv = loadDotenv(cwd);
-        String explicit = environment.getOrDefault("KLAUDE_CONFIG", dotenv.get("KLAUDE_CONFIG"));
+        Map<String, String> resolvedEnvironment = resolveEnvironment(cwd, environment);
+        String explicit = resolvedEnvironment.get("KLAUDE_CONFIG");
         if (explicit == null) {
             applyTomlIfPresent(config, home.resolve(".klaude/config.toml"), cwd, home);
             applyTomlIfPresent(config, cwd.resolve(".klaude/config.toml"), cwd, home);
         } else {
             applyTomlIfPresent(config, resolvePath(explicit, cwd, home), cwd, home);
         }
-        applyEnvironment(config, dotenv, cwd, home);
-        applyEnvironment(config, environment, cwd, home);
+        applyEnvironment(config, resolvedEnvironment, cwd, home);
         return config.freeze();
+    }
+
+    // 合并项目 dotenv 与进程环境并让进程变量优先
+    public Map<String, String> resolveEnvironment(
+            Path workingDirectory, Map<String, String> processEnvironment) {
+        Path cwd = workingDirectory.toAbsolutePath().normalize();
+        Map<String, String> resolved = new HashMap<>(loadDotenv(cwd));
+        resolved.putAll(Map.copyOf(processEnvironment));
+        return Map.copyOf(resolved);
     }
 
     // 展开 home 前缀并将相对路径解析到 daemon 工作目录

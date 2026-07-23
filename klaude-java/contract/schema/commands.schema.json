@@ -189,6 +189,49 @@
       "title": "SessionGetHistoryCommand",
       "type": "object"
     },
+    "RunCancelCommand": {
+      "properties": {
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "run.cancel",
+          "default": "run.cancel",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id"
+      ],
+      "title": "RunCancelCommand",
+      "type": "object"
+    },
+    "SessionListCommand": {
+      "properties": {
+        "type": {
+          "const": "session.list",
+          "default": "session.list",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "SessionListCommand",
+      "type": "object"
+    },
+    "SkillListCommand": {
+      "properties": {
+        "type": {
+          "const": "skill.list",
+          "default": "skill.list",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "SkillListCommand",
+      "type": "object"
+    },
     "SessionSendMessageCommand": {
       "properties": {
         "content": {
@@ -220,11 +263,14 @@
       "core.ping": "#/$defs/PingCommand",
       "event.subscribe": "#/$defs/EventSubscribeCommand",
       "permission.respond": "#/$defs/PermissionRespondCommand",
+      "run.cancel": "#/$defs/RunCancelCommand",
       "session.close": "#/$defs/SessionCloseCommand",
       "session.compact": "#/$defs/SessionCompactCommand",
       "session.create": "#/$defs/SessionCreateCommand",
       "session.get_history": "#/$defs/SessionGetHistoryCommand",
-      "session.send_message": "#/$defs/SessionSendMessageCommand"
+      "session.list": "#/$defs/SessionListCommand",
+      "session.send_message": "#/$defs/SessionSendMessageCommand",
+      "skill.list": "#/$defs/SkillListCommand"
     },
     "propertyName": "type"
   },
@@ -255,6 +301,15 @@
     },
     {
       "$ref": "#/$defs/SessionCompactCommand"
+    },
+    {
+      "$ref": "#/$defs/SessionListCommand"
+    },
+    {
+      "$ref": "#/$defs/SkillListCommand"
+    },
+    {
+      "$ref": "#/$defs/RunCancelCommand"
     }
   ]
 }

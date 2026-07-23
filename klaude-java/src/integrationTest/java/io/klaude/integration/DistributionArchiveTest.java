@@ -17,6 +17,10 @@ final class DistributionArchiveTest {
             var names = zip.stream().map(entry -> entry.getName()).toList();
             assertThat(names).anyMatch(name -> name.endsWith("/bin/klaude-core-java"));
             assertThat(names).anyMatch(name -> name.endsWith("/bin/klaude-core-java.bat"));
+            assertThat(names).anyMatch(name -> name.endsWith("/bin/klaude"));
+            assertThat(names).anyMatch(name -> name.endsWith("/bin/klaude.bat"));
+            assertThat(names).anyMatch(name -> name.endsWith("/bin/klaude-tui"));
+            assertThat(names).anyMatch(name -> name.endsWith("/bin/klaude-tui.bat"));
             assertThat(names).anyMatch(name -> name.matches(".*/lib/klaude-java-.*\\.jar"));
             assertThat(names).anyMatch(name -> name.matches(".*/lib/netty-transport-.*\\.jar"));
         }

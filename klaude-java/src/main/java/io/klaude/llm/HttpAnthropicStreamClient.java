@@ -50,7 +50,7 @@ public final class HttpAnthropicStreamClient implements AnthropicStreamClient, A
         } catch (IOException error) {
             return CompletableFuture.failedFuture(error);
         }
-        HttpRequest httpRequest = HttpRequest.newBuilder(endpoint.resolve("/v1/messages"))
+        HttpRequest httpRequest = HttpRequest.newBuilder(messagesEndpoint(endpoint))
                 .timeout(Duration.ofMinutes(5))
                 .header("x-api-key", apiKey)
                 .header("anthropic-version", "2023-06-01")
@@ -78,6 +78,15 @@ public final class HttpAnthropicStreamClient implements AnthropicStreamClient, A
                     return CompletableFuture.supplyAsync(
                             () -> parseResponse(response.body(), tokens), executor);
                 });
+    }
+
+    // 在保留第三方路径前缀的前提下生成 Messages API 地址
+    private static URI messagesEndpoint(URI base) {
+        String value = base.toString();
+        if (value.endsWith("/v1/messages")) {
+            return base;
+        }
+        return URI.create((value.endsWith("/") ? value : value + "/") + "v1/messages");
     }
 
     // 构造含 prompt caching 边界的 Anthropic request JSON

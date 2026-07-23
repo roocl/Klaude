@@ -13,7 +13,7 @@ import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 final class CommandFixtureTest {
-    // 功能：验证九种命令 fixture 均映射到独立 record 并按 JSON tree 无损往返
+    // 功能：验证十二种命令 fixture 均映射到独立 record 并按 JSON tree 无损往返
     // 设计：从公共 contract 逐行读取，避免在 Java 测试中复制字段和默认值
     @Test
     void allCommandFixturesRoundTrip() throws Exception {
@@ -34,7 +34,7 @@ final class CommandFixtureTest {
             }
         }
 
-        assertThat(count).isEqualTo(9);
+        assertThat(count).isEqualTo(12);
         assertThat(recordNames).containsExactlyInAnyOrder(
                 "PingCommand",
                 "AgentRunCommand",
@@ -44,7 +44,10 @@ final class CommandFixtureTest {
                 "SessionGetHistoryCommand",
                 "SessionCloseCommand",
                 "PermissionRespondCommand",
-                "SessionCompactCommand");
+                "SessionCompactCommand",
+                "SessionListCommand",
+                "SkillListCommand",
+                "RunCancelCommand");
     }
 
     // 功能：验证未知判别值、缺少必填字段、错误类型和非法 enum 均被拒绝

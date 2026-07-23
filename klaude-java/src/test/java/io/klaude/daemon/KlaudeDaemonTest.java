@@ -425,4 +425,56 @@ final class KlaudeDaemonTest {
             }
         }
     }
+
+    // 功能：通过 IPC 发现 sessions 与 skills
+    // 设计：注入固定 session 和 skill catalog，使用真实 socket 验证两个公开列表结果
+    @Test
+    void listsSessionsAndSkillsOverIpc(@TempDir Path temp) throws Exception {
+        Clock clock = Clock.fixed(Instant.parse("2026-07-20T00:00:00Z"), ZoneOffset.UTC);
+        var sessions = new io.klaude.session.SessionManager(
+                new io.klaude.session.SessionStore(temp.resolve("sessions"), clock),
+                () -> "sess-fixed",
+                clock,
+                event -> java.util.concurrent.CompletableFuture.completedFuture(null));
+        sessions.create(io.klaude.protocol.SessionMode.CHAT, "demo").toCompletableFuture().get();
+        var skills = List.of(new io.klaude.protocol.SkillInfo(
+                "review", "Review code", List.of("read_file")));
+        try (KlaudeDaemon daemon = new KlaudeDaemon(
+                "127.0.0.1", 0, temp.resolve("runs"), temp.resolve("trace.jsonl"),
+                clock, () -> "12345678", null, goal -> "run-fixed", sessions, () -> skills,
+                runId -> runId.equals("run-fixed"))) {
+            daemon.start().get(5, java.util.concurrent.TimeUnit.SECONDS);
+            try (Socket socket = new Socket("127.0.0.1", daemon.port());
+                 var writer = new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8);
+                 var reader = new BufferedReader(new InputStreamReader(
+                         socket.getInputStream(), StandardCharsets.UTF_8))) {
+                socket.setSoTimeout(5_000);
+                writer.write("{\"jsonrpc\":\"2.0\",\"id\":\"sessions\","
+                        + "\"method\":\"session.list\",\"params\":{}}\n");
+                writer.flush();
+                var sessionResult = ProtocolJson.mapper().readTree(reader.readLine())
+                        .path("result").path("sessions");
+                assertThat(sessionResult).singleElement()
+                        .satisfies(item -> assertThat(item.path("session_id").asText())
+                                .isEqualTo("sess-fixed"));
+
+                writer.write("{\"jsonrpc\":\"2.0\",\"id\":\"skills\","
+                        + "\"method\":\"skill.list\",\"params\":{}}\n");
+                writer.flush();
+                var skillResult = ProtocolJson.mapper().readTree(reader.readLine())
+                        .path("result").path("skills");
+                assertThat(skillResult).singleElement()
+                        .satisfies(item -> assertThat(item.path("name").asText())
+                                .isEqualTo("review"));
+
+                writer.write("{\"jsonrpc\":\"2.0\",\"id\":\"cancel\","
+                        + "\"method\":\"run.cancel\","
+                        + "\"params\":{\"run_id\":\"run-fixed\"}}\n");
+                writer.flush();
+                var cancelled = ProtocolJson.mapper().readTree(reader.readLine())
+                        .path("result").path("cancelled");
+                assertThat(cancelled.asBoolean()).isTrue();
+            }
+        }
+    }
 }

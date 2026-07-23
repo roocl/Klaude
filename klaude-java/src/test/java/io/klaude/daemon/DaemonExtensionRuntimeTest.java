@@ -79,6 +79,11 @@ final class DaemonExtensionRuntimeTest {
         assertThat(prompt.goal()).isEqualTo("Review src/Main.java");
         assertThat(prompt.systemPromptOverride()).isEqualTo("Review $ARGUMENTS");
         assertThat(prompt.allowedTools()).containsExactly("read_file");
+        assertThat(runtime.listSkills()).singleElement().satisfies(skill -> {
+            assertThat(skill.name()).isEqualTo("review");
+            assertThat(skill.description()).isEqualTo("review files");
+            assertThat(skill.allowedTools()).containsExactly("read_file");
+        });
         runtime.close();
         assertThat(healthy.closed).isTrue();
     }

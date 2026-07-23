@@ -97,6 +97,15 @@ public final class DaemonExtensionRuntime implements AutoCloseable {
         return mcp.tools();
     }
 
+    // 返回按名称排序的公开 skill 摘要
+    public List<io.klaude.protocol.SkillInfo> listSkills() {
+        return skills.listAll().stream()
+                .map(skill -> new io.klaude.protocol.SkillInfo(
+                        skill.name(), skill.description(), skill.allowedTools()))
+                .sorted(java.util.Comparator.comparing(io.klaude.protocol.SkillInfo::name))
+                .toList();
+    }
+
     // 返回共享后台 child registry
     public BackgroundSubagentRegistry backgrounds() {
         return backgrounds;

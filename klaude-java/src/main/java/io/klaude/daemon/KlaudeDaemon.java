@@ -56,6 +56,8 @@ public final class KlaudeDaemon implements AutoCloseable {
     private final PermissionManager permissions;
     private final Function<String, String> agentRuns;
     private final SessionManager sessions;
+    private final Supplier<java.util.List<io.klaude.protocol.SkillInfo>> skills;
+    private final java.util.function.Predicate<String> runCancellation;
     private volatile Instant startedAt;
 
     // 组合 daemon 的 transport、持久化路径、时间与 subscription ID 边界
@@ -114,6 +116,49 @@ public final class KlaudeDaemon implements AutoCloseable {
             PermissionManager permissions,
             Function<String, String> agentRuns,
             SessionManager sessions) {
+        this(
+                host,
+                port,
+                runsRoot,
+                tracePath,
+                clock,
+                subscriptionIds,
+                permissions,
+                agentRuns,
+                sessions,
+                java.util.List::of);
+    }
+
+    // 组合 daemon 边界并注入 session 与 skill discovery
+    public KlaudeDaemon(
+            String host,
+            int port,
+            Path runsRoot,
+            Path tracePath,
+            Clock clock,
+            Supplier<String> subscriptionIds,
+            PermissionManager permissions,
+            Function<String, String> agentRuns,
+            SessionManager sessions,
+            Supplier<java.util.List<io.klaude.protocol.SkillInfo>> skills) {
+        this(
+                host, port, runsRoot, tracePath, clock, subscriptionIds, permissions,
+                agentRuns, sessions, skills, runId -> false);
+    }
+
+    // 组合 daemon 边界并注入完整发现与 run 取消能力
+    public KlaudeDaemon(
+            String host,
+            int port,
+            Path runsRoot,
+            Path tracePath,
+            Clock clock,
+            Supplier<String> subscriptionIds,
+            PermissionManager permissions,
+            Function<String, String> agentRuns,
+            SessionManager sessions,
+            Supplier<java.util.List<io.klaude.protocol.SkillInfo>> skills,
+            java.util.function.Predicate<String> runCancellation) {
         this.host = host;
         this.clock = clock;
         this.runsRoot = runsRoot.toAbsolutePath().normalize();
@@ -124,6 +169,8 @@ public final class KlaudeDaemon implements AutoCloseable {
         this.permissions = permissions;
         this.agentRuns = agentRuns;
         this.sessions = sessions;
+        this.skills = java.util.Objects.requireNonNull(skills, "skills");
+        this.runCancellation = java.util.Objects.requireNonNull(runCancellation, "runCancellation");
         this.eventBus.subscribe(event -> {
             com.fasterxml.jackson.databind.node.ObjectNode wire =
                     ProtocolJson.mapper().valueToTree(event);
@@ -183,6 +230,13 @@ public final class KlaudeDaemon implements AutoCloseable {
                 return CompletableFuture.completedFuture(ProtocolJson.mapper().valueToTree(
                         new AgentRunResult(runId)));
             });
+            dispatcher.register("run.cancel", (connection, params) -> {
+                var command = (io.klaude.protocol.RunCancelCommand) parseCommand(
+                        "run.cancel", params);
+                return CompletableFuture.completedFuture(ProtocolJson.mapper().valueToTree(
+                        new io.klaude.protocol.RunCancelResult(
+                                runCancellation.test(command.runId()))));
+            });
         }
         if (sessions != null) {
             dispatcher.register("session.create", (connection, params) -> {
@@ -198,6 +252,14 @@ public final class KlaudeDaemon implements AutoCloseable {
                 return mapSessionErrors(sessions.getHistory(command.sessionId()))
                         .thenApply(messages -> ProtocolJson.mapper().valueToTree(
                                 new SessionGetHistoryResult(messages)));
+            });
+            dispatcher.register("session.list", (connection, params) -> {
+                parseCommand("session.list", params);
+                return sessions.listSessions().thenApply(items ->
+                        ProtocolJson.mapper().valueToTree(
+                                new io.klaude.protocol.SessionListResult(items.stream()
+                                        .map(KlaudeDaemon::sessionInfo)
+                                        .toList())));
             });
             dispatcher.register("session.close", (connection, params) -> {
                 SessionCloseCommand command =
@@ -222,6 +284,11 @@ public final class KlaudeDaemon implements AutoCloseable {
                         .thenApply(ProtocolJson.mapper()::valueToTree);
             });
         }
+        dispatcher.register("skill.list", (connection, params) -> {
+            parseCommand("skill.list", params);
+            return CompletableFuture.completedFuture(ProtocolJson.mapper().valueToTree(
+                    new io.klaude.protocol.SkillListResult(skills.get())));
+        });
         if (permissions != null) {
             dispatcher.register("permission.respond", (connection, params) -> {
                 PermissionRespondCommand command =
@@ -237,6 +304,20 @@ public final class KlaudeDaemon implements AutoCloseable {
                         new PermissionRespondResult(Boolean.TRUE)));
             });
         }
+    }
+
+    // 将内部 session metadata 映射为稳定的公开列表项
+    private static io.klaude.protocol.SessionInfo sessionInfo(io.klaude.session.Session session) {
+        String lastRunId = session.runIds().isEmpty()
+                ? ""
+                : session.runIds().getLast();
+        return new io.klaude.protocol.SessionInfo(
+                session.id(),
+                session.mode(),
+                session.status(),
+                session.title(),
+                session.updatedAt(),
+                lastRunId);
     }
 
     // 给裸 params 补入 method discriminator 并通过 sealed Command 入口校验

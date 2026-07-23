@@ -20,7 +20,7 @@ final class LauncherScriptTest {
         assertThat(process.waitFor(10, TimeUnit.SECONDS)).isTrue();
         String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         assertThat(process.exitValue()).isZero();
-        assertThat(output).contains("runtime=java", "klaude-core-java.bat");
+        assertThat(output).contains("runtime=java", "java_home=", "klaude-core-java.bat");
     }
 
     // 功能：验证 Unix launcher 默认选择 Java 发行入口

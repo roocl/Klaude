@@ -7,3 +7,6 @@
 {"session_id":"session-001","type":"session.close"}
 {"decision":"allow_once","tool_use_id":"tool-001","type":"permission.respond"}
 {"focus":"保留决策","session_id":"session-001","type":"session.compact"}
+{"type":"session.list"}
+{"type":"skill.list"}
+{"run_id":"run-001","type":"run.cancel"}

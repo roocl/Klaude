@@ -52,6 +52,26 @@ public final class SessionStore {
         return ProtocolJson.mapper().readValue(sessionDirectory(sessionId).resolve("meta.json").toFile(), Session.class);
     }
 
+    // 读取全部有效 session metadata 并按最近更新时间倒序排列
+    public List<Session> listMeta() throws IOException {
+        List<Session> sessions = new ArrayList<>();
+        try (var directories = Files.list(root)) {
+            for (Path directory : directories.filter(Files::isDirectory).toList()) {
+                Path metadata = directory.resolve("meta.json");
+                if (!Files.isRegularFile(metadata)) {
+                    continue;
+                }
+                try {
+                    sessions.add(ProtocolJson.mapper().readValue(metadata.toFile(), Session.class));
+                } catch (IOException | RuntimeException ignored) {
+                    // A malformed optional session directory must not hide healthy sessions.
+                }
+            }
+        }
+        sessions.sort(java.util.Comparator.comparing(Session::updatedAt).reversed());
+        return List.copyOf(sessions);
+    }
+
     // 将不可变 session metadata 以 UTF-8 JSON 写入 meta.json
     public void writeMeta(Session session) throws IOException {
         Path directory = sessionDirectory(session.id());
